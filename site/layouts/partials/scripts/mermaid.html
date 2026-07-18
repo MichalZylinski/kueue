@@ -1,0 +1,41 @@
+{{/* Override of docsy@v0.11.0 scripts/mermaid.html: the upstream partial reads
+     Resource.Err, which was removed in Hugo v0.141 (replaced by `try`), so any
+     page containing a mermaid code block fails to render with the Hugo version
+     pinned by this repo (0.164). Drop this override once docsy is bumped to a
+     release that uses `try`. */}}
+{{ $version := .Site.Params.mermaid.version | default "latest" -}}
+{{ $cdnurl := printf "https://cdn.jsdelivr.net/npm/mermaid@%s/dist/mermaid.esm.min.mjs" $version -}}
+{{ $fetched := try (resources.GetRemote $cdnurl) -}}
+{{ with $fetched.Err -}}
+  {{ warnf "Could not retrieve mermaid script from CDN. Reason: %s." . -}}
+{{ end -}}
+
+<script type="module" async>
+  import mermaid from "{{ $cdnurl }}";
+
+  (function ($) {
+    if ($('.mermaid').length == 0) {
+      mermaid.initialize({ startOnLoad: false });
+      return;
+    }
+
+    var params = {{ .Site.Params.mermaid | jsonify | safeJS }};
+
+    // Sets default mermaid theme based on the user's current color scheme preference
+    if (!(params.theme)) {
+      const savedTheme = localStorage.getItem('darkmode');
+      let userPrefersDark;
+      if (savedTheme !== null) {
+        userPrefersDark = (savedTheme === 'true');
+      } else {
+        userPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      }
+      params.theme = userPrefersDark ? 'dark' : 'default';
+    }
+
+    mermaid.initialize(Object.assign({ "startOnLoad": true }, params));
+    $('.language-mermaid').each(function (index, element) {
+      $(element).parent().replaceWith('<pre class="mermaid">' + $(element).text() + '</pre>');
+    });
+  })(jQuery);
+</script>
