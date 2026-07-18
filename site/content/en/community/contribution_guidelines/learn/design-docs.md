@@ -1,7 +1,7 @@
 ---
 title: "Design docs: the KEP process and a reading syllabus"
 linkTitle: "KEPs & design docs"
-weight: 60
+weight: 40
 description: >
   When you need a KEP, and which existing KEPs to read for each area of the code
 type: docs

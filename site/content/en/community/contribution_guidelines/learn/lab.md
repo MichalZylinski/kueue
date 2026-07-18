@@ -1,7 +1,7 @@
 ---
 title: "Onboarding lab: the katas"
 linkTitle: "Onboarding lab"
-weight: 50
+weight: 30
 description: >
   Eight hands-on exercises with verifiable outcomes, from first admission to a red-then-green integration test
 type: docs

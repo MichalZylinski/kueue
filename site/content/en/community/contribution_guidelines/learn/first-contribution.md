@@ -1,7 +1,7 @@
 ---
 title: "Your first contribution"
 linkTitle: "First contribution"
-weight: 15
+weight: 20
 description: >
   The PR workflow, recipes for common change types, and what reviewers look for
 type: docs

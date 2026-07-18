@@ -1,7 +1,7 @@
 ---
 title: "Architecture: from job to running pods"
 linkTitle: "Architecture"
-weight: 30
+weight: 10
 description: >
   What Kueue is, how the repository is laid out, and the life of a workload end to end
 type: docs

@@ -1,7 +1,7 @@
 ---
 title: "Website contributions"
 linkTitle: "Website"
-weight: 30
+weight: 90
 description: >
   Build, preview, and verify links on the Kueue documentation site
 type: docs
