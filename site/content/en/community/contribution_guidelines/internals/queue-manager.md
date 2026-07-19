@@ -7,9 +7,9 @@ description: >
 type: docs
 ---
 
-<!-- Verified against main@2b494fec3 (the v0.19 cut). Re-verify each minor release. -->
+<!-- Written from a read of the source around the v0.19 cut. Links point at main (not a pinned commit), so files/directories stay resolvable as the code evolves; described behavior may drift in detail over time -- if something looks off, a fix or a removal is equally welcome, no need to reconcile the whole page. -->
 
-Package: `pkg/cache/queue/`. This is Kueue's "waiting room": every workload that is *not yet admitted* lives here, ordered and ready for the scheduler to pop.
+Package: [`pkg/cache/queue/`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/cache/queue). This is Kueue's "waiting room": every workload that is *not yet admitted* lives here, ordered and ready for the scheduler to pop.
 
 ## 2.1 Structure
 
@@ -24,16 +24,16 @@ Manager (manager.go)                 one per process; a big mutex + a Broadcast 
  └── AFS penalty tracking                                  (afs/)
 ```
 
-A workload's path: `AddOrUpdateWorkload` (manager.go:628) resolves LocalQueue → ClusterQueue, wraps it in `workload.Info`, and pushes it onto the ClusterQueue's heap.
+A workload's path: `AddOrUpdateWorkload` ([`pkg/cache/queue/manager.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/manager.go)) resolves LocalQueue → ClusterQueue, wraps it in `workload.Info`, and pushes it onto the ClusterQueue's heap.
 
 ## 2.2 Ordering: the queueing strategies
 
-Heap order (see `cluster_queue.go`) is by **priority, then eviction/creation timestamp**. The `queueingStrategy` on the ClusterQueue changes *what happens when the head doesn't fit*:
+Heap order (see [`cluster_queue.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/cluster_queue.go)) is by **priority, then eviction/creation timestamp**. The `queueingStrategy` on the ClusterQueue changes *what happens when the head doesn't fit*:
 
 - **`StrictFIFO`** — the queue is a strict line: if the head is inadmissible it blocks everything behind it (predictability over throughput). The head stays the head.
 - **`BestEffortFIFO`** (default) — an inadmissible head is moved aside into `inadmissibleWorkloads`, letting smaller workloads behind it through.
 
-Whether a workload re-enters the heap immediately or parks as inadmissible is decided by `RequeueWorkload(... reason)` (manager.go:675) — the `RequeueReason` distinguishes "failed after nomination" from "became eligible again."
+Whether a workload re-enters the heap immediately or parks as inadmissible is decided by `RequeueWorkload(... reason)` ([`pkg/cache/queue/manager.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/manager.go)) — the `RequeueReason` distinguishes "failed after nomination" from "became eligible again."
 
 ## 2.3 The inadmissible set and event-driven retries
 
@@ -43,14 +43,14 @@ Whether a workload re-enters the heap immediately or parks as inadmissible is de
 
 ## 2.4 `Heads()`: the hand-off to the scheduler
 
-`Heads(ctx)` (manager.go:810) is the single point of contact with the scheduler: it returns the head workload of *every* active ClusterQueue, **blocking on the condition variable while all heaps are empty**. That is why the scheduling cycle in `scheduler.go` "blocks while the queues are empty" — the block is here.
+`Heads(ctx)` ([`pkg/cache/queue/manager.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/manager.go)) is the single point of contact with the scheduler: it returns the head workload of *every* active ClusterQueue, **blocking on the condition variable while all heaps are empty**. That is why the scheduling cycle in [`scheduler.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/scheduler/scheduler.go) "blocks while the queues are empty" — the block is here.
 
 ## 2.5 Odds and ends worth knowing
 
-- **Second-pass queue** — some admissions need a follow-up scheduling pass shortly after (e.g. TAS after preemption victims actually vanish); `second_pass_queue.go` holds them.
-- **StopPolicy / status checker** — `status_checker.go` answers "is this CQ active?"; workloads submitted to a held/stopped queue are parked with a reason surfaced in the workload status.
-- **Dumper** — `dumper.go` prints queue contents; triggered via `hack/dump_cache.sh`. Extend it when you add state here.
+- **Second-pass queue** — some admissions need a follow-up scheduling pass shortly after (e.g. TAS after preemption victims actually vanish); [`second_pass_queue.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/second_pass_queue.go) holds them.
+- **StopPolicy / status checker** — [`status_checker.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/status_checker.go) answers "is this CQ active?"; workloads submitted to a held/stopped queue are parked with a reason surfaced in the workload status.
+- **Dumper** — [`dumper.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/queue/dumper.go) prints queue contents; triggered via [`hack/dump_cache.sh`](https://github.com/kubernetes-sigs/kueue/blob/main/hack/dump_cache.sh). Extend it when you add state here.
 - **`finishedWorkloads` LRU** — recently finished workloads are remembered to avoid re-adding them (races between the job reconciler and workload deletion).
 - **Concurrent admission (KEP-8691)** — `ConcurrentAdmissionEnabled*` methods special-case "parent" workloads that fan out into variants; feature-gated by `ConcurrentAdmission`, an active development area.
 
-**Where you'll engage:** queueing-order features (priority defaulting, AFS ordering), new requeue triggers, StrictFIFO/BestEffortFIFO semantics, visibility (pending-position APIs read from here). Tests: `pkg/cache/queue/*_test.go` + `test/integration/singlecluster/scheduler/`.
+**Where you'll engage:** queueing-order features (priority defaulting, AFS ordering), new requeue triggers, StrictFIFO/BestEffortFIFO semantics, visibility (pending-position APIs read from here). Tests: `pkg/cache/queue/*_test.go` + [`test/integration/singlecluster/scheduler/`](https://github.com/kubernetes-sigs/kueue/tree/main/test/integration/singlecluster/scheduler).

@@ -7,9 +7,9 @@ description: >
 type: docs
 ---
 
-<!-- Verified against main@2b494fec3 (the v0.19 cut). Re-verify each minor release. -->
+<!-- Written from a read of the source around the v0.19 cut. Links point at main (not a pinned commit), so files/directories stay resolvable as the code evolves; described behavior may drift in detail over time -- if something looks off, a fix or a removal is equally welcome, no need to reconcile the whole page. -->
 
-Everything in Kueue converges on the `Workload` type (`apis/kueue/v1beta2/workload_types.go`). If you understand this one object completely, every subsystem becomes "code that reads or writes some part of a Workload."
+Everything in Kueue converges on the `Workload` type ([`apis/kueue/v1beta2/workload_types.go`](https://github.com/kubernetes-sigs/kueue/blob/main/apis/kueue/v1beta2/workload_types.go)). If you understand this one object completely, every subsystem becomes "code that reads or writes some part of a Workload."
 
 ## 1.1 Spec: what the job needs
 
@@ -29,8 +29,8 @@ spec:
 
 Key ideas:
 
-- **PodSets are the resource-accounting unit.** A `batch/Job` maps to one pod set; a JobSet or RayJob maps to several (driver/workers, leader/replicas). The scheduler computes `count × per-pod-requests` per pod set — helpers in `pkg/podset/` and `pkg/workload/resources.go` (which also applies LimitRanges, runtime class overhead, and the `resources.transformations` from the configuration).
-- **Priority is resolved at creation** into `.spec.priority` from either a `WorkloadPriorityClass` (label `kueue.x-k8s.io/priority-class`, Kueue-specific, doesn't affect pod preemption by kubelet — KEP-973) or the pod's Kubernetes PriorityClass. Code: `pkg/util/priority/`.
+- **PodSets are the resource-accounting unit.** A `batch/Job` maps to one pod set; a JobSet or RayJob maps to several (driver/workers, leader/replicas). The scheduler computes `count × per-pod-requests` per pod set — helpers in [`pkg/podset/`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/podset) and [`pkg/workload/resources.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/workload/resources.go) (which also applies LimitRanges, runtime class overhead, and the `resources.transformations` from the configuration).
+- **Priority is resolved at creation** into `.spec.priority` from either a `WorkloadPriorityClass` (label `kueue.x-k8s.io/priority-class`, Kueue-specific, doesn't affect pod preemption by kubelet — KEP-973) or the pod's Kubernetes PriorityClass. Code: [`pkg/util/priority/`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/util/priority).
 - **`active`** is the deactivation switch: the workload controller evicts a workload whose `active=false` (`WorkloadDeactivated` eviction reason) — used by users, by MultiKueue, and by the maximum-execution-time feature (label `kueue.x-k8s.io/max-exec-time-seconds`).
 
 ## 1.2 Status: what Kueue decided
@@ -56,7 +56,7 @@ The `admission` block is the scheduler's output and the contract with the job fr
 
 ## 1.3 The condition state machine
 
-Defined around `workload_types.go:929–1013`; manipulated almost exclusively through helpers in `pkg/workload/workload.go` (never hand-roll condition updates — grep for an existing helper first):
+Defined around [`apis/kueue/v1beta2/workload_types.go`](https://github.com/kubernetes-sigs/kueue/blob/main/apis/kueue/v1beta2/workload_types.go); manipulated almost exclusively through helpers in [`pkg/workload/workload.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/workload/workload.go) (never hand-roll condition updates — grep for an existing helper first):
 
 ```
  (pending) ──scheduler──▶ QuotaReserved ──all AdmissionChecks Ready──▶ Admitted ──job done──▶ Finished
@@ -69,13 +69,13 @@ Defined around `workload_types.go:929–1013`; manipulated almost exclusively th
 
 Contributor-critical details:
 
-- **`Evicted` is a process, not just a flag.** Eviction is two-phase: the evictor sets `Evicted=True` with a reason (`pkg/workload/evict/`), then the workload controller (`pkg/controller/core/workload_controller.go`) finishes the job: suspends via the job framework, clears `.status.admission`, releases quota in the cache, sets `Requeued`, and re-enqueues with backoff. When touching eviction paths, always ask "who completes the second phase?"
+- **`Evicted` is a process, not just a flag.** Eviction is two-phase: the evictor sets `Evicted=True` with a reason ([`pkg/workload/evict/`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/workload/evict)), then the workload controller ([`pkg/controller/core/workload_controller.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/controller/core/workload_controller.go)) finishes the job: suspends via the job framework, clears `.status.admission`, releases quota in the cache, sets `Requeued`, and re-enqueues with backoff. When touching eviction paths, always ask "who completes the second phase?"
 - **Requeue backoff** (`.status.requeueState`, KEP-1282): evictions under `waitForPodsReady` increment a counter with exponential backoff; exceeding `backoffLimitCount` deactivates the workload. Note: `waitForPodsReady` is **enabled by default since v0.19** (30-minute timeout, `blockAdmission: false`; opt out via config or the `DisableWaitForPodsReady` gate), so this path is now live in default installations.
 - **Eviction reasons are an API.** Each reason constant (Preempted, PodsReadyTimeout, AdmissionCheck, ClusterQueueStopped, Deactivated, NodeFailures…) shows up in conditions, events, and metrics. Reusing a reason for a semantically different operation is a review blocker (see the terminology rule in the architecture page).
 
 ## 1.4 `workload.Info`: the in-memory view
 
-The scheduler and both caches never work with raw `*kueue.Workload` alone; they wrap it in `workload.Info` (`pkg/workload/workload.go:205`):
+The scheduler and both caches never work with raw `*kueue.Workload` alone; they wrap it in `workload.Info` ([`pkg/workload/workload.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/workload/workload.go)):
 
 ```go
 type Info struct {
@@ -92,9 +92,9 @@ type Info struct {
 
 ## 1.5 Identity and lifecycle plumbing
 
-- Name: `<job-type-prefix>-<job-name>-<suffix>` (`pkg/controller/jobframework/workload_names.go`; `ShortWorkloadNames` gate changes the scheme).
+- Name: `<job-type-prefix>-<job-name>-<suffix>` ([`pkg/controller/jobframework/workload_names.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/controller/jobframework/workload_names.go); `ShortWorkloadNames` gate changes the scheme).
 - `ownerReferences[0]` → the parent job; label `kueue.x-k8s.io/job-uid` → parent UID (indexed; the standard way to find a job's workload).
 - A finalizer (`kueue.x-k8s.io/resource-in-use`) protects in-use objects; orphaned workloads (job deleted) are garbage-collected — feature `FinishOrphanedWorkloads` and `objectRetentionPolicies` in the configuration control terminal-object GC (KEP-1618).
-- **Updates use SSA-style patching** through `pkg/workload/patching/` (see `PatchAdmissionStatus` usage in the scheduler). Never `Update()` a workload status directly in new code; conflicts and field ownership are handled centrally there.
+- **Updates use SSA-style patching** through [`pkg/workload/patching/`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/workload/patching) (see `PatchAdmissionStatus` usage in the scheduler). Never `Update()` a workload status directly in new code; conflicts and field ownership are handled centrally there.
 
-**Where you'll engage:** almost every feature adds a condition, a reason, a status field, or a spec knob here — which means webhook validation (`pkg/webhooks/workload_webhook.go`), conversion from `v1beta1`, helper functions, and integration tests in `test/integration/singlecluster/controller/`.
+**Where you'll engage:** almost every feature adds a condition, a reason, a status field, or a spec knob here — which means webhook validation ([`pkg/webhooks/workload_webhook.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/webhooks/workload_webhook.go)), conversion from `v1beta1`, helper functions, and integration tests in [`test/integration/singlecluster/controller/`](https://github.com/kubernetes-sigs/kueue/tree/main/test/integration/singlecluster/controller).

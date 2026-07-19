@@ -7,7 +7,7 @@ description: >
 type: docs
 ---
 
-<!-- Verified against main@2b494fec3 (the v0.19 cut). Re-verify each minor release. -->
+<!-- Written from a read of the source around the v0.19 cut. Links point at main (not a pinned commit), so files/directories stay resolvable as the code evolves; described behavior may drift in detail over time -- if something looks off, a fix or a removal is equally welcome, no need to reconcile the whole page. -->
 
 
 Each leaf names the command to run or the subsystem (see the internals pages) to inspect. These orderings matter: queue health before quota, quota before checks.

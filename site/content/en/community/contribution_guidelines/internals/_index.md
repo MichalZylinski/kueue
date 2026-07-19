@@ -7,7 +7,7 @@ description: >
 type: docs
 ---
 
-<!-- Verified against main@2b494fec3 (the v0.19 cut). Re-verify each minor release. -->
+<!-- Written from a read of the source around the v0.19 cut. Links point at main (not a pinned commit), so files/directories stay resolvable as the code evolves; described behavior may drift in detail over time -- if something looks off, a fix or a removal is equally welcome, no need to reconcile the whole page. -->
 
 These chapters explain how Kueue's core subsystems work, written to be read with the code open on a second screen. Read [Architecture](../learn/architecture/) first for the overall map.
 

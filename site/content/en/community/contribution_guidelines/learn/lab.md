@@ -7,7 +7,7 @@ description: >
 type: docs
 ---
 
-<!-- Verified against main@2b494fec3 (the v0.19 cut). Re-verify each minor release. -->
+<!-- Written from a read of the source around the v0.19 cut. Links point at main (not a pinned commit), so files/directories stay resolvable as the code evolves; described behavior may drift in detail over time -- if something looks off, a fix or a removal is equally welcome, no need to reconcile the whole page. -->
 
 Eight hands-on exercises with a goal, steps, and a concrete pass condition each. Expected total time: one focused day, or a kata per evening for a week. Prerequisites: a clone of kueue, Go (version from `go.mod`), Docker, `kind`, `kubectl`; on macOS also `brew install gnu-sed`. Katas 0-5 need no code changes; katas 6-7 are code katas.
 
@@ -28,7 +28,7 @@ kubectl -n kueue-system patch deploy kueue-controller-manager --type json \
 kubectl -n kueue-system wait --for=condition=Ready pod -l control-plane=controller-manager --timeout=300s
 ```
 
-> ⚠️ **Why not just `make deploy`?** The deploy manifests bake in an image tag derived from `git describe` (e.g. `kueue:v0.19.0-devel-284-gxxxxxxx-dirty`) — a tag that exists in **no registry**, so the pod lands in `ImagePullBackOff`. You must build and `kind load` that exact tag yourself. And because the base manifest sets `imagePullPolicy: Always`, the kubelet would still try the registry — the patch flips it to `IfNotPresent`, exactly what the project's own e2e scripts do (`hack/testing/e2e-common.sh`).
+> ⚠️ **Why not just `make deploy`?** The deploy manifests bake in an image tag derived from `git describe` (e.g. `kueue:v0.19.0-devel-284-gxxxxxxx-dirty`) — a tag that exists in **no registry**, so the pod lands in `ImagePullBackOff`. You must build and `kind load` that exact tag yourself. And because the base manifest sets `imagePullPolicy: Always`, the kubelet would still try the registry — the patch flips it to `IfNotPresent`, exactly what the project's own e2e scripts do ([`hack/testing/e2e-common.sh`](https://github.com/kubernetes-sigs/kueue/blob/main/hack/testing/e2e-common.sh)).
 
 **Verify (pass condition):**
 ```bash
@@ -172,7 +172,7 @@ kubectl -n kueue-system logs deploy/kueue-controller-manager --since=2m \
 
 > ⚠️ The two admission lines — `"Workload assumed in the cache"` and `"Workload successfully admitted and assigned flavors"` — only appear when a workload is **actually admitted** in that cycle. If your quota is still full from Kata 3, you'll see the cycle-phase lines but no admission; free some quota (delete a low job) and watch them appear.
 
-**Verify:** you can point at the log line for each phase and name the function that emitted it (all in `pkg/scheduler/scheduler.go`): `Heads()` blocking → `Snapshot()` → `nominate()` → per-entry `processEntry` → `assumeWorkload` → requeue. Note the `schedulingCycle` counter incrementing per cycle.
+**Verify:** you can point at the log line for each phase and name the function that emitted it (all in [`pkg/scheduler/scheduler.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/scheduler/scheduler.go)): `Heads()` blocking → `Snapshot()` → `nominate()` → per-entry `processEntry` → `assumeWorkload` → requeue. Note the `schedulingCycle` counter incrementing per cycle.
 
 **Bonus:** for per-workload flavor-assignment detail, raise verbosity by *replacing* the existing level arg (don't append a second one):
 ```bash
@@ -193,7 +193,7 @@ kubectl delete resourceflavor default-flavor
 kubectl get resourceflavor default-flavor -o jsonpath='{.metadata.deletionTimestamp} {.metadata.finalizers}'
 ```
 
-> 🔍 **Surprise (verified):** the delete "succeeds" but the flavor only goes `Terminating` — it carries the `kueue.x-k8s.io/resource-in-use` finalizer, which the ResourceFlavor controller holds **as long as any ClusterQueue references the flavor** (see `ClusterQueuesUsingFlavor` in `pkg/controller/core/resourceflavor_controller.go`). Kueue is protecting you from exactly the breakage this kata wants to demonstrate. The CQ meanwhile stays `Active=True`.
+> 🔍 **Surprise (verified):** the delete "succeeds" but the flavor only goes `Terminating` — it carries the `kueue.x-k8s.io/resource-in-use` finalizer, which the ResourceFlavor controller holds **as long as any ClusterQueue references the flavor** (see `ClusterQueuesUsingFlavor` in [`pkg/controller/core/resourceflavor_controller.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/controller/core/resourceflavor_controller.go)). Kueue is protecting you from exactly the breakage this kata wants to demonstrate. The CQ meanwhile stays `Active=True`.
 
 So break it the way it happens in real life — a **reference to a flavor that doesn't exist** (typo, wrong apply order):
 
@@ -219,15 +219,15 @@ kubectl apply -f examples/admin/single-clusterqueue-setup.yaml   # recreates fla
 ```
 …and confirm the parked workload admits by itself within seconds (same requeue machinery as Kata 2 — CQ/flavor events are among the triggers). Re-apply your Kata 3 preemption patch if you continue on.
 
-**What you learned:** CQ activation state lives in the scheduler cache (`pkg/cache/scheduler/clusterqueue.go` — the `FlavorNotFound` reason), the in-use finalizer's real semantics, and the debugging order "queue health before quota" — the spine of the troubleshooting trees in the architecture pageV.
+**What you learned:** CQ activation state lives in the scheduler cache ([`pkg/cache/scheduler/clusterqueue.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/cache/scheduler/clusterqueue.go) — the `FlavorNotFound` reason), the in-use finalizer's real semantics, and the debugging order "queue health before quota" — the spine of the troubleshooting trees in the architecture pageV.
 
 
 ## Kata 6 — Code kata: ship a feature gate end-to-end
 
 **Goal:** run the full change workflow (code → gate → codegen → verify) on a throwaway change. This rehearses Recipe B from the architecture page with real tooling friction.
 
-1. In `pkg/features/kube_features.go`, declare a gate `SchedulerCycleGreeting` (copy the comment/format of a neighboring alpha gate, including the `versionedSpecs` default entry — Alpha, default off).
-2. In `pkg/scheduler/scheduler.go`, inside `schedule()`, add:
+1. In [`pkg/features/kube_features.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/features/kube_features.go), declare a gate `SchedulerCycleGreeting` (copy the comment/format of a neighboring alpha gate, including the `versionedSpecs` default entry — Alpha, default off).
+2. In [`pkg/scheduler/scheduler.go`](https://github.com/kubernetes-sigs/kueue/blob/main/pkg/scheduler/scheduler.go), inside `schedule()`, add:
    ```go
    if features.Enabled(features.SchedulerCycleGreeting) {
        log.V(2).Info("Hello from my first Kueue change")
@@ -257,18 +257,18 @@ kubectl apply -f examples/admin/single-clusterqueue-setup.yaml   # recreates fla
    ```
    Wait for the rollout **and** pod readiness before submitting the next job (the webhook briefly refuses connections mid-restart), then confirm the greeting is gone while `"Scheduling cycle starts"` lines keep flowing — **you have now tested both gate states**, which is exactly what reviewers will ask about.
 
-**Verify:** greeting appears only when the gate is on; the gate shows up in `test/compatibility_lifecycle/reference/versioned_feature_list.yaml` after codegen.
+**Verify:** greeting appears only when the gate is on; the gate shows up in [`test/compatibility_lifecycle/reference/versioned_feature_list.yaml`](https://github.com/kubernetes-sigs/kueue/blob/main/test/compatibility_lifecycle/reference/versioned_feature_list.yaml) after codegen.
 
 Then `git checkout . && git clean -fd` — this kata ships nothing. 😉
 
 
 ## Kata 7 — Test kata: write a failing integration test first
 
-**Goal:** learn the envtest framework and `test/util` builders — the muscle you'll use in every real PR.
+**Goal:** learn the envtest framework and [`test/util`](https://github.com/kubernetes-sigs/kueue/tree/main/test/util) builders — the muscle you'll use in every real PR.
 
-1. Open `test/integration/singlecluster/scheduler/` and skim one existing spec to absorb the pattern — two helper packages work together:
-   - **object builders** in `pkg/util/testing/v1beta2` (imported as `utiltestingapi`): `utiltestingapi.MakeClusterQueue("cq").ResourceGroup(...).Obj()`, `MakeResourceFlavor`, `MakeLocalQueue`, `MakeWorkload`…
-   - **assertion/lifecycle helpers** in `test/util` (imported as `util`): `util.MustCreate`, `util.ExpectWorkloadsToBeAdmitted`, `util.ExpectWorkloadsToBePending`, `util.DeleteNamespace`…
+1. Open [`test/integration/singlecluster/scheduler/`](https://github.com/kubernetes-sigs/kueue/tree/main/test/integration/singlecluster/scheduler) and skim one existing spec to absorb the pattern — two helper packages work together:
+   - **object builders** in [`pkg/util/testing/v1beta2`](https://github.com/kubernetes-sigs/kueue/tree/main/pkg/util/testing/v1beta2) (imported as `utiltestingapi`): `utiltestingapi.MakeClusterQueue("cq").ResourceGroup(...).Obj()`, `MakeResourceFlavor`, `MakeLocalQueue`, `MakeWorkload`…
+   - **assertion/lifecycle helpers** in [`test/util`](https://github.com/kubernetes-sigs/kueue/tree/main/test/util) (imported as `util`): `util.MustCreate`, `util.ExpectWorkloadsToBeAdmitted`, `util.ExpectWorkloadsToBePending`, `util.DeleteNamespace`…
 2. Write a new file (e.g. `kata_test.go`, `package scheduler`) with a focused spec asserting something **currently false**: create a flavor + CQ with 5 CPU nominal quota + LQ in a fresh namespace, then a 6-CPU workload, then `util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, wl)`. Clean up in `AfterEach` (`util.DeleteNamespace` + `util.ExpectObjectToBeDeleted` for CQ and flavor). Compile-check cheaply with `go vet ./test/integration/singlecluster/scheduler/` before invoking the heavy runner.
 3. Run just your spec:
    ```bash
