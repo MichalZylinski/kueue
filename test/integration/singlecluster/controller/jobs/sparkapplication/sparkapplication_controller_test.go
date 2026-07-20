@@ -272,8 +272,12 @@ var _ = ginkgo.Describe("SparkApplication controller with TopologyAwareSchedulin
 				Label(utiltesting.DefaultBlockTopologyLevel, "b1").
 				Label(utiltesting.DefaultRackTopologyLevel, "r1").
 				StatusAllocatable(corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("1"),
-					corev1.ResourceMemory: resource.MustParse("1Gi"),
+					corev1.ResourceCPU: resource.MustParse("1"),
+					// Large enough for both the driver and executor pods,
+					// whose accounted memory includes Spark's off-heap
+					// overhead on top of the requested 512Mi (see P1 of
+					// keps/0000-elastic-sparkapplication).
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
 					corev1.ResourcePods:   resource.MustParse("10"),
 				}).
 				Ready().

@@ -18,9 +18,11 @@ package sparkapplication
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 
 	sparkv1beta2 "github.com/kubeflow/spark-operator/v2/api/v1beta2"
 	sparkcommon "github.com/kubeflow/spark-operator/v2/pkg/common"
@@ -37,6 +39,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
 
 var (
@@ -47,6 +50,15 @@ const (
 	FrameworkName      = "sparkoperator.k8s.io/sparkapplication"
 	driverPodSetName   = "driver"
 	executorPodSetName = "executor"
+
+	// SparkApplicationPodSetReplicaSizesAnnotation records the last PodSet
+	// counts Kueue observed for an elastic SparkApplication. SparkApplication's
+	// own metadata.generation never changes when the driver scales executors
+	// (unlike RayCluster, whose autoscaler mutates the CR spec), so this
+	// annotation is both the durable record of observed demand and the extra
+	// entropy fed into elastic slice naming (see GetWorkloadNameExtraPart).
+	// This annotation is alpha-level, enabled by ElasticJobsViaWorkloadSlices.
+	SparkApplicationPodSetReplicaSizesAnnotation = "kueue.x-k8s.io/sparkapplication-podset-replica-sizes"
 )
 
 func init() {
@@ -67,11 +79,13 @@ func NewJob() jobframework.GenericJob {
 	return &SparkApplication{}
 }
 
-var NewReconciler = jobframework.NewGenericReconcilerFactory(NewJob)
-
 type SparkApplication sparkv1beta2.SparkApplication
 
-var _ jobframework.GenericJob = (*SparkApplication)(nil)
+var (
+	_ jobframework.GenericJob                  = (*SparkApplication)(nil)
+	_ jobframework.JobWithCustomAnnotations    = (*SparkApplication)(nil)
+	_ jobframework.ElasticWorkloadNameProvider = (*SparkApplication)(nil)
+)
 
 func (j *SparkApplication) Object() client.Object {
 	return (*sparkv1beta2.SparkApplication)(j)
@@ -97,7 +111,7 @@ func (j *SparkApplication) PodLabelSelector() string {
 	return fmt.Sprintf("%s=%s", sparkcommon.LabelSparkAppName, j.Name)
 }
 
-func (j *SparkApplication) PodSets(ctx context.Context, _ client.Client) ([]kueue.PodSet, error) {
+func (j *SparkApplication) PodSets(ctx context.Context, c client.Client) ([]kueue.PodSet, error) {
 	// driver and executor
 	podSets := make([]kueue.PodSet, 2)
 
@@ -135,10 +149,14 @@ func (j *SparkApplication) PodSets(ctx context.Context, _ client.Client) ([]kueu
 	if err != nil {
 		return nil, err
 	}
+	executorCount, err := j.numExecutors(ctx, c)
+	if err != nil {
+		return nil, err
+	}
 	podSets[1] = kueue.PodSet{
 		Name:     executorPodSetName,
 		Template: *executorPodTemplateSpec,
-		Count:    j.numInitialExecutors(),
+		Count:    executorCount,
 	}
 
 	if err := setTopologyRequestToPodSetIfEnabled(
@@ -317,7 +335,18 @@ func (j *SparkApplication) PodsReady(ctx context.Context, _ client.Client) bool 
 	// AppState.State alone goes to Running as soon as the driver starts even if
 	// executors are stuck (e.g. unschedulable), which would let the
 	// waitForPodsReady timeout never fire on heterogeneous resource shortages.
+	//
+	// For elastic applications, "requested" isn't a fixed target — the
+	// executor count grows and shrinks with observed demand — so instead of
+	// spec.executor.instances this uses the guaranteed floor
+	// (max(1, minExecutors)): the application is ready once it has reached
+	// the baseline it will always be re-admitted to, regardless of further
+	// scale-up. Scaling beyond that floor must not re-arm this check.
 	expected := int(ptr.Deref(j.Spec.Executor.Instances, 0))
+	if workloadslicing.Enabled(j) {
+		da := ptr.Deref(j.Spec.DynamicAllocation, sparkv1beta2.DynamicAllocation{})
+		expected = max(1, int(ptr.Deref(da.MinExecutors, 0)))
+	}
 	if expected == 0 {
 		return true
 	}
@@ -329,6 +358,44 @@ func (j *SparkApplication) PodsReady(ctx context.Context, _ client.Client) bool 
 		}
 	}
 	return ready >= expected
+}
+
+// GetCustomAnnotations implements jobframework.JobWithCustomAnnotations. For
+// elastic SparkApplications it persists the observed PodSet counts onto the
+// object as SparkApplicationPodSetReplicaSizesAnnotation, so the last known
+// size survives controller restarts and is visible on `kubectl get`. It is a
+// no-op for non-elastic applications.
+func (j *SparkApplication) GetCustomAnnotations(_ context.Context, _ client.Client, podSets []kueue.PodSet) (map[string]string, error) {
+	if !workloadslicing.Enabled(j) {
+		return nil, nil
+	}
+	sizes := make([]jobframework.PodSetReplicaSize, len(podSets))
+	for i, ps := range podSets {
+		sizes[i] = jobframework.PodSetReplicaSize{Name: ps.Name, Count: ps.Count}
+	}
+	replicaSizesJSON, err := json.Marshal(sizes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal PodSet replica sizes: %w", err)
+	}
+	return map[string]string{
+		SparkApplicationPodSetReplicaSizesAnnotation: string(replicaSizesJSON),
+	}, nil
+}
+
+// GetWorkloadNameExtraPart implements jobframework.ElasticWorkloadNameProvider.
+// SparkApplication's generation never changes when the driver scales
+// executors, so distinct observed sizes are given distinct slice names by
+// incorporating the replica-sizes annotation content (see
+// GetCustomAnnotations) alongside the generation, mirroring
+// raycluster.GetWorkloadNameExtraPart's generation+child-state pattern. The
+// annotation content is hashed into a short deterministic suffix downstream
+// by jobframework's workload name generation, so it is passed through as-is.
+func (j *SparkApplication) GetWorkloadNameExtraPart() string {
+	extra := strconv.FormatInt(j.Generation, 10)
+	if replicaSizes := j.Annotations[SparkApplicationPodSetReplicaSizesAnnotation]; replicaSizes != "" {
+		extra += "_" + replicaSizes
+	}
+	return extra
 }
 
 func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {

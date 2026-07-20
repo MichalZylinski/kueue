@@ -17,10 +17,12 @@ limitations under the License.
 package sparkapplication
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	sparkv1beta2 "github.com/kubeflow/spark-operator/v2/api/v1beta2"
@@ -30,6 +32,30 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
+)
+
+const (
+	// defaultSparkCores mirrors Spark's default for spark.driver.cores /
+	// spark.executor.cores when neither that nor coreRequest is set.
+	defaultSparkCores = 1
+
+	// defaultExecutorInstances mirrors Spark's default for spark.executor.instances
+	// in static (non dynamic-allocation) mode when the field is unset.
+	defaultExecutorInstances = 2
+
+	// defaultMemoryOverheadFactorJVM and defaultMemoryOverheadFactorNonJVM mirror
+	// spark.{driver,executor}.memoryOverheadFactor defaults: 10% for JVM
+	// languages (Java/Scala), 40% for non-JVM languages (Python/R), which need
+	// more off-heap headroom.
+	defaultMemoryOverheadFactorJVM    = 0.1
+	defaultMemoryOverheadFactorNonJVM = 0.4
+
+	// minMemoryOverheadMiB is the floor Spark applies to the computed memory
+	// overhead regardless of the factor.
+	minMemoryOverheadMiB = 384
 )
 
 var (
@@ -49,8 +75,107 @@ var (
 	}
 )
 
+// numInitialExecutors returns the number of executor pods Spark will create at
+// startup, so the initial Workload PodSet count matches reality.
+//
+// In static (non dynamic-allocation) mode, it mirrors Spark's own default of 2
+// executors when spec.executor.instances is unset.
+//
+// When dynamic allocation is enabled, Spark ignores the static default and
+// instead ramps from max(instances, initialExecutors, minExecutors) — see
+// "If .spec.executor.instances is also set, the initial number of executors is
+// set to the bigger of that and this option" in the spark-operator API doc for
+// dynamicAllocation.initialExecutors.
 func (j *SparkApplication) numInitialExecutors() int32 {
-	return ptr.Deref(j.Spec.Executor.Instances, 0)
+	da := ptr.Deref(j.Spec.DynamicAllocation, sparkv1beta2.DynamicAllocation{})
+	if !da.Enabled {
+		return ptr.Deref(j.Spec.Executor.Instances, defaultExecutorInstances)
+	}
+
+	target := ptr.Deref(j.Spec.Executor.Instances, 0)
+	if v := ptr.Deref(da.InitialExecutors, 0); v > target {
+		target = v
+	}
+	if v := ptr.Deref(da.MinExecutors, 0); v > target {
+		target = v
+	}
+	return target
+}
+
+// numExecutors returns the executor PodSet count for the Workload.
+//
+// For non-elastic applications this is simply numInitialExecutors(): Spark
+// never resizes an application whose spec doesn't change.
+//
+// For elastic applications, the SparkApplication spec never reflects
+// dynamic-allocation scaling (the driver creates and deletes executor pods
+// directly, without touching the spec), so the count is instead derived from
+// observed executor pod demand: the number of live (non-terminal,
+// non-deleting) executor pods, floored at the initial target before the
+// driver starts and at minExecutors once it's running (so demand never
+// implies fewer executors than Spark itself will always re-request), and
+// capped at maxExecutors (required by webhook validation for elastic jobs).
+func (j *SparkApplication) numExecutors(ctx context.Context, c client.Client) (int32, error) {
+	if !workloadslicing.Enabled(j) {
+		return j.numInitialExecutors(), nil
+	}
+
+	floor := j.numInitialExecutors()
+	if j.Status.AppState.State == sparkv1beta2.ApplicationStateRunning {
+		da := ptr.Deref(j.Spec.DynamicAllocation, sparkv1beta2.DynamicAllocation{})
+		floor = ptr.Deref(da.MinExecutors, 0)
+	}
+
+	if c == nil {
+		// No client available (e.g. webhook validation building a PodSet
+		// template outside of admission). Fall back to the floor; the
+		// reconciler always has a client and will observe live demand.
+		return floor, nil
+	}
+
+	observed, err := j.observedExecutorCount(ctx, c)
+	if err != nil {
+		return 0, err
+	}
+
+	desired := max(observed, floor)
+
+	maxExecutors := ptr.Deref(ptr.Deref(j.Spec.DynamicAllocation, sparkv1beta2.DynamicAllocation{}).MaxExecutors, 0)
+	if maxExecutors > 0 && desired > maxExecutors {
+		desired = maxExecutors
+	}
+
+	return desired, nil
+}
+
+// observedExecutorCount lists the application's executor pods and counts
+// those that are neither terminal (Succeeded/Failed) nor being deleted.
+// Pending (including gated) executor pods are counted, since a gated pod is
+// itself the signal of scale-up demand.
+func (j *SparkApplication) observedExecutorCount(ctx context.Context, c client.Client) (int32, error) {
+	var podList corev1.PodList
+	if err := c.List(ctx, &podList,
+		client.InNamespace(j.Namespace),
+		client.MatchingLabels{
+			sparkcommon.LabelSparkAppName: j.Name,
+			sparkcommon.LabelSparkRole:    sparkcommon.SparkRoleExecutor,
+		},
+	); err != nil {
+		return 0, fmt.Errorf("failed to list executor pods: %w", err)
+	}
+
+	var count int32
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (j *SparkApplication) buildDriverPodTemplateSpec() (*corev1.PodTemplateSpec, error) {
@@ -340,6 +465,11 @@ func addTolerations(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {
 	return nil
 }
 
+// addCPURequests sets the container's CPU request to what Spark will actually
+// request for the real pod: coreRequest if set, else an integer quantity built
+// from cores (spark.{driver,executor}.cores), else Spark's own default of 1
+// core. Unlike coreRequest (a Kubernetes-style quantity string, e.g. "500m"),
+// cores is a whole-core count.
 func addCPURequests(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {
 	i := findContainer(pod)
 	if i < 0 {
@@ -347,20 +477,27 @@ func addCPURequests(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {
 	}
 
 	var cpuRequests *string
+	var cores *int32
 	if sparkutil.IsDriverPod(pod) {
 		cpuRequests = app.Spec.Driver.CoreRequest
+		cores = app.Spec.Driver.Cores
 	} else if sparkutil.IsExecutorPod(pod) {
 		cpuRequests = app.Spec.Executor.CoreRequest
+		cores = app.Spec.Executor.Cores
 	}
 
-	if cpuRequests == nil {
-		return nil
-	}
-
-	// Convert CPU requests to a Kubernetes-style unit
-	requestsQuantity, err := resource.ParseQuantity(*cpuRequests)
-	if err != nil {
-		return fmt.Errorf("failed to parse CPU requests %s: %v", *cpuRequests, err)
+	var requestsQuantity resource.Quantity
+	switch {
+	case cpuRequests != nil:
+		var err error
+		requestsQuantity, err = resource.ParseQuantity(*cpuRequests)
+		if err != nil {
+			return fmt.Errorf("failed to parse CPU requests %s: %w", *cpuRequests, err)
+		}
+	case cores != nil && *cores > 0:
+		requestsQuantity = *resource.NewQuantity(int64(*cores), resource.DecimalSI)
+	default:
+		requestsQuantity = *resource.NewQuantity(defaultSparkCores, resource.DecimalSI)
 	}
 
 	if pod.Spec.Containers[i].Resources.Requests == nil {
@@ -404,17 +541,24 @@ func addCPULimit(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {
 	return nil
 }
 
+// addMemoryRequests sets the container's memory request to what Spark will
+// actually request for the real pod: the configured memory plus the computed
+// off-heap overhead (see computeMemoryOverhead). Spark always adds overhead on
+// top of `memory` for the real pod, so accounting for `memory` alone
+// under-counts by at least the overhead floor (384Mi).
 func addMemoryRequests(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {
 	i := findContainer(pod)
 	if i < 0 {
 		return fmt.Errorf("failed to add memory requests as Spark container was not found in pod %s", pod.Name)
 	}
 
-	var memoryRequests *string
+	var memoryRequests, memoryOverhead *string
 	if sparkutil.IsDriverPod(pod) {
 		memoryRequests = app.Spec.Driver.Memory
+		memoryOverhead = app.Spec.Driver.MemoryOverhead
 	} else if sparkutil.IsExecutorPod(pod) {
 		memoryRequests = app.Spec.Executor.Memory
+		memoryOverhead = app.Spec.Executor.MemoryOverhead
 	}
 
 	if memoryRequests == nil {
@@ -424,16 +568,56 @@ func addMemoryRequests(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) erro
 	// Convert memory requests to a Kubernetes-style unit
 	requestsQuantity, err := resource.ParseQuantity(sparkutil.ConvertJavaMemoryStringToK8sMemoryString(*memoryRequests))
 	if err != nil {
-		return fmt.Errorf("failed to parse memory requests %s: %v", *memoryRequests, err)
+		return fmt.Errorf("failed to parse memory requests %s: %w", *memoryRequests, err)
 	}
+
+	overheadQuantity, err := computeMemoryOverhead(requestsQuantity, memoryOverhead, app.Spec.MemoryOverheadFactor, app.Spec.Type)
+	if err != nil {
+		return err
+	}
+	requestsQuantity.Add(overheadQuantity)
 
 	if pod.Spec.Containers[i].Resources.Requests == nil {
 		pod.Spec.Containers[i].Resources.Requests = corev1.ResourceList{}
 	}
 
-	// Apply the memory requests to the container's resources
+	// Apply the memory requests (including overhead) to the container's resources
 	pod.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory] = requestsQuantity
 	return nil
+}
+
+// computeMemoryOverhead mirrors Spark's off-heap memory overhead computation:
+// the explicit memoryOverhead value if set, else max(factor * memory, 384Mi),
+// where factor is memoryOverheadFactor if set, else 0.1 for JVM languages
+// (Java/Scala) or 0.4 for non-JVM languages (Python/R), which need more
+// off-heap headroom.
+func computeMemoryOverhead(memory resource.Quantity, explicitOverhead, factorOverride *string, appType sparkv1beta2.SparkApplicationType) (resource.Quantity, error) {
+	if explicitOverhead != nil {
+		overheadQuantity, err := resource.ParseQuantity(sparkutil.ConvertJavaMemoryStringToK8sMemoryString(*explicitOverhead))
+		if err != nil {
+			return resource.Quantity{}, fmt.Errorf("failed to parse memory overhead %s: %w", *explicitOverhead, err)
+		}
+		return overheadQuantity, nil
+	}
+
+	factor := defaultMemoryOverheadFactorJVM
+	if appType == sparkv1beta2.SparkApplicationTypePython || appType == sparkv1beta2.SparkApplicationTypeR {
+		factor = defaultMemoryOverheadFactorNonJVM
+	}
+	if factorOverride != nil {
+		parsed, err := strconv.ParseFloat(*factorOverride, 64)
+		if err != nil {
+			return resource.Quantity{}, fmt.Errorf("failed to parse memoryOverheadFactor %s: %w", *factorOverride, err)
+		}
+		factor = parsed
+	}
+
+	floorBytes := int64(minMemoryOverheadMiB) * 1024 * 1024
+	overheadBytes := int64(float64(memory.Value()) * factor)
+	if overheadBytes < floorBytes {
+		overheadBytes = floorBytes
+	}
+	return *resource.NewQuantity(overheadBytes, resource.BinarySI), nil
 }
 
 func addMemoryLimit(pod *corev1.Pod, app *sparkv1beta2.SparkApplication) error {

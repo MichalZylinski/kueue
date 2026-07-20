@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-base/featuregate"
 	testingclock "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -46,6 +47,7 @@ import (
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	sparkapplicationtesting "sigs.k8s.io/kueue/pkg/util/testingjobs/sparkapplication"
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
 
 var (
@@ -97,7 +99,7 @@ func TestPodSets(t *testing.T) {
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("512Mi"),
+									corev1.ResourceMemory: resource.MustParse("896Mi"),
 								},
 							},
 						},
@@ -113,7 +115,7 @@ func TestPodSets(t *testing.T) {
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("512Mi"),
+									corev1.ResourceMemory: resource.MustParse("896Mi"),
 								},
 							},
 						},
@@ -146,7 +148,7 @@ func TestPodSets(t *testing.T) {
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
+										corev1.ResourceMemory: resource.MustParse("896Mi"),
 									},
 								},
 							},
@@ -168,7 +170,7 @@ func TestPodSets(t *testing.T) {
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
+										corev1.ResourceMemory: resource.MustParse("896Mi"),
 									},
 								},
 							},
@@ -200,7 +202,7 @@ func TestPodSets(t *testing.T) {
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
+										corev1.ResourceMemory: resource.MustParse("896Mi"),
 									},
 								},
 							},
@@ -221,7 +223,7 @@ func TestPodSets(t *testing.T) {
 								Resources: corev1.ResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceCPU:    resource.MustParse("100m"),
-										corev1.ResourceMemory: resource.MustParse("512Mi"),
+										corev1.ResourceMemory: resource.MustParse("896Mi"),
 									},
 								},
 							},
@@ -795,6 +797,181 @@ func TestReconciler(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantWorkloads, gotWorkloads.Items, workloadCmpOpts...); diff != "" {
 				t.Errorf("Workloads after reconcile (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestGetCustomAnnotations asserts that the replica-sizes annotation is only
+// produced for elastic applications, and that it accurately serializes the
+// given PodSet counts.
+func TestGetCustomAnnotations(t *testing.T) {
+	elasticApp := sparkapplicationtesting.MakeSparkApplication("sparkapp", "ns").
+		Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+		Obj()
+	nonElasticApp := sparkapplicationtesting.MakeSparkApplication("sparkapp", "ns").Obj()
+
+	podSets := []kueue.PodSet{
+		*utiltestingapi.MakePodSet(driverPodSetName, 1).Obj(),
+		*utiltestingapi.MakePodSet(executorPodSetName, 5).Obj(),
+	}
+
+	testCases := map[string]struct {
+		sparkApp     *sparkappv1beta2.SparkApplication
+		featureGates map[featuregate.Feature]bool
+		want         map[string]string
+	}{
+		"elastic application returns the replica-sizes annotation": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp:     elasticApp,
+			want: map[string]string{
+				SparkApplicationPodSetReplicaSizesAnnotation: `[{"name":"driver","count":1},{"name":"executor","count":5}]`,
+			},
+		},
+		"non-elastic application returns nil": {
+			sparkApp: nonElasticApp,
+			want:     nil,
+		},
+		"elastic annotation without the feature gate returns nil": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: false},
+			sparkApp:     elasticApp,
+			want:         nil,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGatesDuringTest(t, tc.featureGates)
+			ctx, _ := utiltesting.ContextWithLog(t)
+
+			j := (*SparkApplication)(tc.sparkApp)
+			got, err := j.GetCustomAnnotations(ctx, nil, podSets)
+			if err != nil {
+				t.Fatalf("GetCustomAnnotations() returned error: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("GetCustomAnnotations() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestGetWorkloadNameExtraPart asserts that distinct observed sizes produce
+// distinct extra parts, and that the same size is deterministic.
+func TestGetWorkloadNameExtraPart(t *testing.T) {
+	base := sparkapplicationtesting.MakeSparkApplication("sparkapp", "ns").Obj()
+
+	withReplicaSizes := func(sizes string) *SparkApplication {
+		app := base.DeepCopy()
+		if sizes != "" {
+			app.Annotations = map[string]string{SparkApplicationPodSetReplicaSizesAnnotation: sizes}
+		}
+		return (*SparkApplication)(app)
+	}
+
+	noAnnotation := withReplicaSizes("")
+	fiveExecutors := withReplicaSizes(`[{"name":"driver","count":1},{"name":"executor","count":5}]`)
+	fiveExecutorsAgain := withReplicaSizes(`[{"name":"driver","count":1},{"name":"executor","count":5}]`)
+	tenExecutors := withReplicaSizes(`[{"name":"driver","count":1},{"name":"executor","count":10}]`)
+
+	if got := noAnnotation.GetWorkloadNameExtraPart(); got == "" {
+		t.Errorf("GetWorkloadNameExtraPart() with no annotation = %q, want non-empty (should at least contain the generation)", got)
+	}
+	if got, want := fiveExecutors.GetWorkloadNameExtraPart(), fiveExecutorsAgain.GetWorkloadNameExtraPart(); got != want {
+		t.Errorf("GetWorkloadNameExtraPart() is not deterministic for the same replica sizes: %q != %q", got, want)
+	}
+	if got, other := fiveExecutors.GetWorkloadNameExtraPart(), tenExecutors.GetWorkloadNameExtraPart(); got == other {
+		t.Errorf("GetWorkloadNameExtraPart() returned the same value %q for different replica sizes", got)
+	}
+	if got, other := noAnnotation.GetWorkloadNameExtraPart(), fiveExecutors.GetWorkloadNameExtraPart(); got == other {
+		t.Errorf("GetWorkloadNameExtraPart() returned the same value %q with and without a replica-sizes annotation", got)
+	}
+}
+
+// TestPodsReady asserts readiness semantics: non-elastic applications must
+// reach spec.executor.instances Running/Completed executors; elastic
+// applications only need to reach their guaranteed floor
+// (max(1, minExecutors)), since their target size is not fixed.
+func TestPodsReady(t *testing.T) {
+	base := sparkapplicationtesting.MakeSparkApplication("sparkapp", "ns")
+
+	withExecutorStates := func(app *sparkappv1beta2.SparkApplication, states ...sparkappv1beta2.ExecutorState) *sparkappv1beta2.SparkApplication {
+		app.Status.ExecutorState = make(map[string]sparkappv1beta2.ExecutorState, len(states))
+		for i, st := range states {
+			app.Status.ExecutorState[fmt.Sprintf("exec-%d", i)] = st
+		}
+		return app
+	}
+
+	testCases := map[string]struct {
+		sparkApp *sparkappv1beta2.SparkApplication
+		want     bool
+	}{
+		"driver not running: not ready": {
+			sparkApp: base.Clone().ExecutorInstances(2).Obj(),
+			want:     false,
+		},
+		"non-elastic: fewer running executors than instances": {
+			sparkApp: func() *sparkappv1beta2.SparkApplication {
+				app := base.Clone().ExecutorInstances(2).Obj()
+				app.Status.AppState.State = sparkappv1beta2.ApplicationStateRunning
+				return withExecutorStates(app, sparkappv1beta2.ExecutorStateRunning)
+			}(),
+			want: false,
+		},
+		"non-elastic: instances met": {
+			sparkApp: func() *sparkappv1beta2.SparkApplication {
+				app := base.Clone().ExecutorInstances(2).Obj()
+				app.Status.AppState.State = sparkappv1beta2.ApplicationStateRunning
+				return withExecutorStates(app, sparkappv1beta2.ExecutorStateRunning, sparkappv1beta2.ExecutorStateCompleted)
+			}(),
+			want: true,
+		},
+		"elastic: minExecutors 0 floors at 1, not met with zero executors": {
+			sparkApp: func() *sparkappv1beta2.SparkApplication {
+				app := base.Clone().
+					Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+					DynamicAllocation(&sparkappv1beta2.DynamicAllocation{Enabled: true, MinExecutors: ptr.To[int32](0)}).
+					Obj()
+				app.Status.AppState.State = sparkappv1beta2.ApplicationStateRunning
+				return app
+			}(),
+			want: false,
+		},
+		"elastic: minExecutors 0 floors at 1, met with one running executor": {
+			sparkApp: func() *sparkappv1beta2.SparkApplication {
+				app := base.Clone().
+					Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+					DynamicAllocation(&sparkappv1beta2.DynamicAllocation{Enabled: true, MinExecutors: ptr.To[int32](0)}).
+					Obj()
+				app.Status.AppState.State = sparkappv1beta2.ApplicationStateRunning
+				return withExecutorStates(app, sparkappv1beta2.ExecutorStateRunning)
+			}(),
+			want: true,
+		},
+		"elastic: scale-up beyond minExecutors does not re-arm readiness": {
+			sparkApp: func() *sparkappv1beta2.SparkApplication {
+				app := base.Clone().
+					Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+					DynamicAllocation(&sparkappv1beta2.DynamicAllocation{Enabled: true, MinExecutors: ptr.To[int32](1)}).
+					Obj()
+				app.Status.AppState.State = sparkappv1beta2.ApplicationStateRunning
+				// Only 1 of the (hypothetical) 5 scaled-up executors is ready,
+				// but the floor of 1 is already satisfied.
+				return withExecutorStates(app, sparkappv1beta2.ExecutorStateRunning)
+			}(),
+			want: true,
+		},
+	}
+
+	features.SetFeatureGatesDuringTest(t, map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true})
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			j := (*SparkApplication)(tc.sparkApp)
+			ctx, _ := utiltesting.ContextWithLog(t)
+			if got := j.PodsReady(ctx, nil); got != tc.want {
+				t.Errorf("PodsReady() = %v, want %v", got, tc.want)
 			}
 		})
 	}

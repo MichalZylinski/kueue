@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
+	"sigs.k8s.io/kueue/pkg/controller/elasticjobs"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	workloadsparkapplication "sigs.k8s.io/kueue/pkg/controller/jobs/sparkapplication"
 	"sigs.k8s.io/kueue/pkg/controller/tas"
@@ -86,6 +87,11 @@ func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		failedWebhook, err := webhooks.Setup(mgr, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
+
+		if features.Enabled(features.ElasticJobsViaWorkloadSlices) {
+			failedCtrl, err := elasticjobs.SetupWithManager(mgr, &config.Configuration{}, nil)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
+		}
 	}
 }
 

@@ -50,6 +50,13 @@ The parallelism can be adjusted (increased or decreased) as long as the job rema
 
 See [Run A RayJob](/docs/tasks/run/rayjobs)
 
+## SparkApplication
+
+See [Run a SparkApplication](/docs/tasks/run/kubeflow/sparkapplications#elastic-scaling-with-dynamic-allocation).
+Unlike the frameworks above, a Spark driver creates and deletes executor pods directly, without
+ever mutating the SparkApplication spec, so Kueue derives the executor count from observed pod
+demand instead of a replica field.
+
 ## Feature Gate
 
 Elastic Workloads via Workload Slices are gated by the following feature flag:
@@ -72,6 +79,8 @@ metadata:
    * `batch/v1.Job`
    * `ray.io/v1.RayJob`
    * `ray.io/v1.RayCluster`
+   * `ray.io/v1.RayService`
+   * `sparkoperator.k8s.io/v1beta2.SparkApplication`
 * Elastic workloads are not supported for jobs with partial admission enabled.
 
     * Attempting to scale jobs with partial admission enabled will result in an admission validation error similar to the following:

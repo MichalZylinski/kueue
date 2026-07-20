@@ -147,6 +147,18 @@ func (w *SparkApplicationWrapper) DynamicAllocation(dynamicAllocation *sparkappv
 	return w
 }
 
+// RestartPolicyType sets the restart policy type.
+func (w *SparkApplicationWrapper) RestartPolicyType(t sparkappv1beta2.RestartPolicyType) *SparkApplicationWrapper {
+	w.Spec.RestartPolicy.Type = t
+	return w
+}
+
+// BatchScheduler sets the batch scheduler name.
+func (w *SparkApplicationWrapper) BatchScheduler(name string) *SparkApplicationWrapper {
+	w.Spec.BatchScheduler = new(name)
+	return w
+}
+
 // DriverServiceAccount sets the driver service account.
 func (w *SparkApplicationWrapper) DriverServiceAccount(sa string) *SparkApplicationWrapper {
 	w.Spec.Driver.ServiceAccount = new(sa)

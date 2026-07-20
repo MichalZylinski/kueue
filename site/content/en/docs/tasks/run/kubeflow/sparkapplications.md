@@ -56,7 +56,7 @@ metadata:
 ```
 
 {{% alert title="Note" color="primary" %}}
-SparkApplication integration does not support dynamic allocation. If you set `spec.dynamicAllocation.enabled=true` in SparkApplication, Kueue will reject such resources in the webhook.
+By default, SparkApplication integration does not support [Spark's dynamic resource allocation](https://spark.apache.org/docs/latest/job-scheduling.html#dynamic-resource-allocation). If you set `spec.dynamicAllocation.enabled=true` on a SparkApplication that is not opted into [elastic scaling](#elastic-scaling-with-dynamic-allocation), Kueue rejects it in the webhook.
 {{% /alert %}}
 
 ### b. Optionally set Suspend field in SparkOperation
@@ -67,6 +67,105 @@ spec:
 ```
 
 By default, Kueue will set `suspend` to true via webhook and unsuspend it when the SparkApplication is admitted.
+
+## Elastic scaling with dynamic allocation
+
+{{< feature-state state="alpha" for_version="v0.19" >}}
+
+Kueue can track and enforce quota for a SparkApplication that uses Spark's own
+[dynamic resource allocation](https://spark.apache.org/docs/latest/job-scheduling.html#dynamic-resource-allocation),
+scaling the number of executors up and down at runtime without suspending or resubmitting the
+application. This builds on [Elastic Workloads](/docs/concepts/elastic_workload), Kueue's general
+mechanism for in-place workload resizing.
+
+### Enabling elastic scaling
+
+Elastic scaling requires both the `ElasticJobsViaWorkloadSlices` feature gate (see the
+[installation guide](/docs/installation/#change-the-feature-gates-configuration)) and an explicit
+opt-in on the SparkApplication itself:
+
+```yaml
+metadata:
+  annotations:
+    kueue.x-k8s.io/elastic-job: "true"
+```
+
+An elastic SparkApplication must also:
+
+- Set `spec.dynamicAllocation.enabled: true` and `spec.dynamicAllocation.maxExecutors` (required — it
+  bounds how much quota the application can eventually claim as it scales).
+- Set `spec.restartPolicy.type: Never` (or leave `restartPolicy` unset). Kueue owns retries for
+  managed jobs; an operator-driven restart (`Always` or `OnFailure`) would resubmit the application
+  after Kueue has already released its quota, leaving the retry unmanaged.
+- Not set `spec.batchScheduler`. Delegating gang scheduling to another scheduler conflicts with
+  Kueue's own admission control over the same pods.
+
+The webhook validates all of the above and rejects a create/update that violates them.
+
+### How it works
+
+Unlike frameworks whose autoscaler mutates the resource spec directly (for example
+[RayCluster](/docs/tasks/run/rayclusters)), a Spark driver creates and deletes executor
+pods on its own, without ever touching the SparkApplication spec. Kueue therefore derives the
+executor count from **observed executor pod demand** rather than from the spec:
+
+- Every driver and executor pod is created with the `kueue.x-k8s.io/elastic-job` scheduling gate,
+  so a newly created executor pod cannot start running until Kueue admits the additional quota it
+  represents.
+- When the driver ramps up and creates more executor pods, Kueue creates a new Workload slice
+  representing the larger executor count. Once that slice is admitted, the new pods are ungated and
+  the previous slice is marked finished.
+- When the driver scales down and deletes idle executor pods, Kueue updates the admitted Workload in
+  place and releases the corresponding quota immediately — no new slice is needed.
+- If a scale-up cannot be admitted (the queue has no spare capacity), the new executor pods simply
+  stay gated and the application keeps running at its current size. Spark's own
+  `spark.kubernetes.allocation.executor.timeout` (default 600s) eventually deletes pods that were
+  never scheduled, and the request shrinks back down on its own.
+
+### Tuning for queue-friendly scaling
+
+Because Kueue only admits a scale-up after it observes the driver's newly created (gated) executor
+pods, consider tuning Spark's own allocation pacing so that ramp-ups arrive in reasonably sized,
+infrequent batches rather than a rapid burst — see
+`spark.dynamicAllocation.schedulerBacklogTimeout`, `spark.dynamicAllocation.executorAllocationRatio`,
+and `spark.kubernetes.allocation.batch.size` in the
+[Spark configuration reference](https://spark.apache.org/docs/latest/configuration.html).
+
+### Limitations
+
+- MultiKueue is not yet supported for elastic SparkApplications.
+- Only `unconstrained` [Topology Aware Scheduling](/docs/concepts/topology_aware_scheduling) mode is
+  supported; an elastic SparkApplication with a required or preferred topology annotation on the
+  driver or executor is rejected.
+- Editing `spec.executor.instances` remains a full application restart (the spark-operator resubmits
+  the application on any spec change) — it is not part of elastic scaling.
+
+### Sample elastic SparkApplication
+
+{{< include "examples/jobs/sample-sparkapplication-elastic.yaml" "yaml" >}}
+
+### Watching it scale
+
+After applying the sample above, the initial Workload is admitted with `driver: 1` and
+`executor: 2` (the `initialExecutors` value) in `spec.podSets`:
+
+```sh
+kubectl get workload -l kueue.x-k8s.io/job-uid=$(kubectl get sparkapplication spark-pi-elastic -o jsonpath='{.metadata.uid}') \
+  -o jsonpath='{.items[0].spec.podSets[*].count}'
+```
+
+As the driver ramps up executors under task backlog, a replacement Workload slice is created and
+admitted with the larger executor count, and the ClusterQueue's reported usage grows to match:
+
+```sh
+kubectl get clusterqueue <your-cluster-queue> -o jsonpath='{.status.flavorsUsage[0].resources[?(@.name=="cpu")].total}'
+```
+
+As executors go idle and Spark deletes them, the admitted Workload's executor count — and the
+ClusterQueue's reported usage — shrink back down in place, without a new slice or any disruption to
+the running driver. This exact sequence (admit → scale up → scale down, with ClusterQueue usage
+asserted at each step) is covered by an automated integration test in
+`test/integration/singlecluster/controller/jobs/sparkapplication/sparkapplication_elastic_test.go`.
 
 ## Sample SparkApplication
 

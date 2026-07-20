@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	sparkappv1beta2 "github.com/kubeflow/spark-operator/v2/api/v1beta2"
+	sparkcommon "github.com/kubeflow/spark-operator/v2/pkg/common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -39,6 +40,17 @@ import (
 
 func TestValidateCreate(t *testing.T) {
 	testSparkApp := sparkapplicationtesting.MakeSparkApplication("test-sparkapp", "test").Suspend(false)
+
+	elasticGatedTemplate := &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.ElasticJobSchedulingGate}},
+		},
+	}
+	elasticTestSparkApp := testSparkApp.Clone().
+		Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+		DriverTemplate(elasticGatedTemplate.DeepCopy()).
+		ExecutorTemplate(elasticGatedTemplate.DeepCopy())
+
 	testcases := map[string]struct {
 		sparkApp     *sparkappv1beta2.SparkApplication
 		featureGates map[featuregate.Feature]bool
@@ -61,20 +73,56 @@ func TestValidateCreate(t *testing.T) {
 				"a kueue managed job can use dynamicAllocation only when the ElasticJobsViaWorkloadSlices feature gate is on and the job is an elastic job",
 			)}.ToAggregate(),
 		},
-		"dynamicAllocation with elastic job feature": {
+		"dynamicAllocation with elastic job feature, gates and maxExecutors present": {
 			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
-			sparkApp: testSparkApp.Clone().Queue("local-queue").Annotation(
-				workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue,
-			).DynamicAllocation(&sparkappv1beta2.DynamicAllocation{
+			sparkApp: elasticTestSparkApp.Clone().Queue("local-queue").DynamicAllocation(&sparkappv1beta2.DynamicAllocation{
 				Enabled:          true,
 				MinExecutors:     new(int32(1)),
 				InitialExecutors: new(int32(2)),
 				MaxExecutors:     new(int32(3)),
 			}).Obj(),
-			wantErr: field.ErrorList{field.Forbidden(
-				field.NewPath("metadata", "annotations").Key(workloadslicing.EnabledAnnotationKey),
-				`elastic job is not supported for "sparkoperator.k8s.io/v1beta2, Kind=SparkApplication"`,
-			)}.ToAggregate(),
+			wantErr: nil,
+		},
+		"elastic job without dynamicAllocation is rejected": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp:     elasticTestSparkApp.Clone().Queue("local-queue").Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(dynamicAllocationEnabledPath, false, "an elastic job must enable dynamicAllocation"),
+				field.Invalid(maxExecutorsPath, int32(0), "an elastic job must set dynamicAllocation.maxExecutors"),
+			}.ToAggregate(),
+		},
+		"elastic job without maxExecutors is rejected": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp: elasticTestSparkApp.Clone().Queue("local-queue").DynamicAllocation(&sparkappv1beta2.DynamicAllocation{
+				Enabled: true,
+			}).Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(maxExecutorsPath, int32(0), "an elastic job must set dynamicAllocation.maxExecutors"),
+			}.ToAggregate(),
+		},
+		"elastic job with minExecutors greater than maxExecutors is rejected": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp: elasticTestSparkApp.Clone().Queue("local-queue").DynamicAllocation(&sparkappv1beta2.DynamicAllocation{
+				Enabled:      true,
+				MinExecutors: new(int32(5)),
+				MaxExecutors: new(int32(3)),
+			}).Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(maxExecutorsPath, int32(3), "must be greater than or equal to dynamicAllocation.minExecutors"),
+			}.ToAggregate(),
+		},
+		"elastic job without scheduling gates is rejected": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp: testSparkApp.Clone().Queue("local-queue").Annotation(
+				workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue,
+			).DynamicAllocation(&sparkappv1beta2.DynamicAllocation{
+				Enabled:      true,
+				MaxExecutors: new(int32(3)),
+			}).Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(driverSchedulingGatesPath, (*corev1.PodTemplateSpec)(nil), "an elastic job must have the ElasticJobSchedulingGate"),
+				field.Invalid(executorSchedulingGatesPath, (*corev1.PodTemplateSpec)(nil), "an elastic job must have the ElasticJobSchedulingGate"),
+			}.ToAggregate(),
 		},
 		"base with TAS": {
 			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
@@ -82,6 +130,38 @@ func TestValidateCreate(t *testing.T) {
 				kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block",
 			).Obj(),
 			wantErr: nil,
+		},
+		"restartPolicy unset (default) is accepted": {
+			sparkApp: testSparkApp.Clone().Queue("local-queue").Obj(),
+			wantErr:  nil,
+		},
+		"restartPolicy Never is accepted": {
+			sparkApp: testSparkApp.Clone().Queue("local-queue").RestartPolicyType(sparkappv1beta2.RestartPolicyNever).Obj(),
+			wantErr:  nil,
+		},
+		"restartPolicy Always is rejected": {
+			sparkApp: testSparkApp.Clone().Queue("local-queue").RestartPolicyType(sparkappv1beta2.RestartPolicyAlways).Obj(),
+			wantErr: field.ErrorList{field.Invalid(
+				restartPolicyTypePath,
+				sparkappv1beta2.RestartPolicyAlways,
+				"a kueue managed job must use restartPolicy.type=Never (or leave it unset); retries are managed by Kueue",
+			)}.ToAggregate(),
+		},
+		"restartPolicy OnFailure is rejected": {
+			sparkApp: testSparkApp.Clone().Queue("local-queue").RestartPolicyType(sparkappv1beta2.RestartPolicyOnFailure).Obj(),
+			wantErr: field.ErrorList{field.Invalid(
+				restartPolicyTypePath,
+				sparkappv1beta2.RestartPolicyOnFailure,
+				"a kueue managed job must use restartPolicy.type=Never (or leave it unset); retries are managed by Kueue",
+			)}.ToAggregate(),
+		},
+		"batchScheduler is rejected": {
+			sparkApp: testSparkApp.Clone().Queue("local-queue").BatchScheduler("volcano").Obj(),
+			wantErr: field.ErrorList{field.Invalid(
+				batchSchedulerPath,
+				"volcano",
+				"a kueue managed job cannot set batchScheduler; it conflicts with Kueue's admission control",
+			)}.ToAggregate(),
 		},
 		"invalid TAS configuration": {
 			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
@@ -125,6 +205,7 @@ func TestDefault(t *testing.T) {
 	testCases := map[string]struct {
 		sparkApp                      *sparkappv1beta2.SparkApplication
 		defaultQueue                  *kueue.LocalQueue
+		featureGates                  map[featuregate.Feature]bool
 		managedJobsNamespacesSelector labels.Selector
 		manageJobsWithoutQueueName    bool
 		withDefaultLocalQueue         bool
@@ -166,9 +247,33 @@ func TestDefault(t *testing.T) {
 			wantSparkApp:          testSparkApp.DeepCopy(),
 			withDefaultLocalQueue: false,
 		},
+		"should gate driver and executor templates for an elastic SparkApplication": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			sparkApp: testSparkApp.Clone().Queue(testLocalQueue.Name).
+				Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				Obj(),
+			wantSparkApp: testSparkApp.Clone().Queue(testLocalQueue.Name).
+				Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				Suspend(true).
+				DriverTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers:      []corev1.Container{{Name: sparkcommon.SparkDriverContainerName}},
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.ElasticJobSchedulingGate}},
+					},
+				}).
+				ExecutorTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers:      []corev1.Container{{Name: sparkcommon.Spark3DefaultExecutorContainerName}},
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.ElasticJobSchedulingGate}},
+					},
+				}).
+				Obj(),
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGatesDuringTest(t, tc.featureGates)
+
 			ctx, _ := utiltesting.ContextWithLog(t)
 
 			kClient := utiltesting.NewClientBuilder().WithObjects(testManagedNamespace.Obj()).Build()
