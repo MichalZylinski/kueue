@@ -70,6 +70,7 @@ func init() {
 		JobType:               &sparkv1beta2.SparkApplication{},
 		AddToScheme:           sparkv1beta2.AddToScheme,
 		CanSupportIntegration: CanSupportIntegration,
+		MultiKueueAdapter:     &multiKueueAdapter{},
 	}))
 }
 

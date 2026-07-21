@@ -937,6 +937,35 @@ func (r *JobReconciler) ensureOneWorkload(ctx context.Context, job GenericJob, o
 			return nil, err
 		}
 
+		// For an elastic job driven by a prebuilt workload (the shape a
+		// MultiKueue worker cluster's remote copy takes), publish the job's
+		// currently observed PodSet demand as custom annotations, mirroring
+		// what the non-prebuilt elastic path below does. Without this, a job
+		// whose scaling signal is only observable locally (e.g.
+		// SparkApplication watching executor pods, rather than a spec field)
+		// has no way to make that demand visible to a management cluster's
+		// MultiKueue adapter syncing this object's annotations back.
+		if workloadslicing.Enabled(object) {
+			if jobWithCustomAnnotations, ok := job.(JobWithCustomAnnotations); ok {
+				podSets, err := JobPodSets(ctx, job, r.client)
+				if err != nil {
+					return nil, fmt.Errorf("failed to retrieve pod sets from job: %w", err)
+				}
+				customAnnotations, err := jobWithCustomAnnotations.GetCustomAnnotations(ctx, r.client, podSets)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get custom annotations based on pod sets from job %s: %w", job.Object().GetName(), err)
+				}
+				if newAnnotations, updated := mergeAnnotations(job, customAnnotations); updated {
+					if err := clientutil.Patch(ctx, r.client, object, func() (bool, error) {
+						job.Object().SetAnnotations(newAnnotations)
+						return true, nil
+					}); err != nil {
+						return nil, fmt.Errorf("failed to update custom annotations on job %s: %w", job.Object().GetName(), err)
+					}
+				}
+			}
+		}
+
 		// Skip the in-sync check for ElasticJob workloads if the workload is a
 		// newly scaled-up replacement. This prevents premature removal of remote
 		// objects for a Job that has not yet been synced after scale-up.
@@ -1327,8 +1356,18 @@ func (r *JobReconciler) startJob(ctx context.Context, job GenericJob, object cli
 	log := ctrl.LoggerFrom(ctx)
 	if features.Enabled(features.MultiKueue) {
 		_, isComposable := job.(ComposableJob)
+		_, hasManagedBy := job.(JobWithManagedBy)
 
-		if isComposable {
+		// ComposableJob types are always checked explicitly (their Run path
+		// handles multi-workload/multi-cluster placement itself). Job types
+		// that don't implement JobWithManagedBy have no way to tell their
+		// underlying controller "a different entity owns this instance" the
+		// way spec.managedBy does for the job types that have it — so for
+		// those, unsuspending locally would make the local copy actually
+		// execute alongside the remote one. Skip local execution for both
+		// cases; job types with ManagedBy support keep relying on it, so
+		// this branch does not change behavior for any job type that has one.
+		if isComposable || !hasManagedBy {
 			skip, err := admissioncheck.ShouldSkipLocalExecution(ctx, r.client, wl)
 			if err != nil {
 				log.V(3).Info("Failed to check for MultiKueue admission check", "workload", klog.KObj(wl), "error", err)

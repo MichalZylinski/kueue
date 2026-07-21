@@ -28,8 +28,11 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/features"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	utiltestingv1beta2 "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	sparkapplicationtesting "sigs.k8s.io/kueue/pkg/util/testingjobs/sparkapplication"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
@@ -400,8 +403,134 @@ func TestNumExecutors(t *testing.T) {
 				for i, p := range tc.pods {
 					objs[i] = p
 				}
-				c = utiltesting.NewClientBuilder(sparkappv1beta2.AddToScheme).WithObjects(objs...).Build()
+				c = utiltesting.NewClientBuilder(sparkappv1beta2.AddToScheme).
+					WithIndex(&kueue.Workload{}, indexer.OwnerReferenceIndexKey(gvk), indexer.WorkloadOwnerIndexFunc(gvk)).
+					WithObjects(objs...).
+					Build()
 			}
+
+			got, err := j.numExecutors(ctx, c)
+			if err != nil {
+				t.Fatalf("numExecutors() returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("numExecutors() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNumExecutorsMultiKueueDelegated covers numExecutors' delegated-mode
+// branch: when this SparkApplication is the management-cluster copy of a
+// MultiKueue-admitted application, demand must come from the mirrored
+// SparkApplicationPodSetReplicaSizesAnnotation (synced back by the
+// SparkApplication MultiKueue adapter), never from local pod observation,
+// since no executor pods ever run on the management cluster.
+func TestNumExecutorsMultiKueueDelegated(t *testing.T) {
+	base := sparkapplicationtesting.MakeSparkApplication("sparkapp", "ns")
+	app := base.Clone().
+		Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+		ExecutorInstances(1).
+		DynamicAllocation(&sparkappv1beta2.DynamicAllocation{Enabled: true, MinExecutors: ptr.To[int32](1), MaxExecutors: ptr.To[int32](10)}).
+		AppState(sparkappv1beta2.ApplicationStateRunning)
+
+	multiKueueAC := utiltestingv1beta2.MakeAdmissionCheck("multikueue-ac").ControllerName(kueue.MultiKueueControllerName).Obj()
+	otherAC := utiltestingv1beta2.MakeAdmissionCheck("other-ac").ControllerName("other-controller").Obj()
+
+	testCases := map[string]struct {
+		sparkApp        *sparkappv1beta2.SparkApplication
+		admissionChecks []*kueue.AdmissionCheck
+		workloads       []*kueue.Workload
+		pods            []*corev1.Pod
+		featureGates    map[featuregate.Feature]bool
+		want            int32
+	}{
+		"delegated: mirrors the replica-sizes annotation instead of observed pods": {
+			sparkApp: app.Clone().
+				Annotation(SparkApplicationPodSetReplicaSizesAnnotation, `[{"name":"executor","count":6}]`).
+				Obj(),
+			admissionChecks: []*kueue.AdmissionCheck{multiKueueAC},
+			workloads: []*kueue.Workload{
+				utiltestingv1beta2.MakeWorkload("sparkapp-wl", "ns").
+					OwnerReference(gvk, "sparkapp", "uid1").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "multikueue-ac"}).
+					Obj(),
+			},
+			pods: []*corev1.Pod{
+				makeExecutorPod(app.Clone().Obj(), "exec-1", corev1.PodRunning, false),
+				makeExecutorPod(app.Clone().Obj(), "exec-2", corev1.PodRunning, false),
+			},
+			want: 6,
+		},
+		"delegated, no mirrored annotation yet: floors at minExecutors": {
+			sparkApp:        app.Clone().Obj(),
+			admissionChecks: []*kueue.AdmissionCheck{multiKueueAC},
+			workloads: []*kueue.Workload{
+				utiltestingv1beta2.MakeWorkload("sparkapp-wl", "ns").
+					OwnerReference(gvk, "sparkapp", "uid1").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "multikueue-ac"}).
+					Obj(),
+			},
+			pods: []*corev1.Pod{
+				makeExecutorPod(app.Clone().Obj(), "exec-1", corev1.PodRunning, false),
+			},
+			want: 1,
+		},
+		"not delegated: admission check is not a MultiKueue controller, observes pods as usual": {
+			sparkApp:        app.Clone().Obj(),
+			admissionChecks: []*kueue.AdmissionCheck{otherAC},
+			workloads: []*kueue.Workload{
+				utiltestingv1beta2.MakeWorkload("sparkapp-wl", "ns").
+					OwnerReference(gvk, "sparkapp", "uid1").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "other-ac"}).
+					Obj(),
+			},
+			pods: []*corev1.Pod{
+				makeExecutorPod(app.Clone().Obj(), "exec-1", corev1.PodRunning, false),
+				makeExecutorPod(app.Clone().Obj(), "exec-2", corev1.PodRunning, false),
+			},
+			want: 2,
+		},
+		"MultiKueue feature gate disabled: never treated as delegated, even with a matching admission check": {
+			featureGates: map[featuregate.Feature]bool{features.MultiKueue: false},
+			sparkApp: app.Clone().
+				Annotation(SparkApplicationPodSetReplicaSizesAnnotation, `[{"name":"executor","count":6}]`).
+				Obj(),
+			admissionChecks: []*kueue.AdmissionCheck{multiKueueAC},
+			workloads: []*kueue.Workload{
+				utiltestingv1beta2.MakeWorkload("sparkapp-wl", "ns").
+					OwnerReference(gvk, "sparkapp", "uid1").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "multikueue-ac"}).
+					Obj(),
+			},
+			pods: []*corev1.Pod{
+				makeExecutorPod(app.Clone().Obj(), "exec-1", corev1.PodRunning, false),
+			},
+			want: 1,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGatesDuringTest(t, tc.featureGates)
+			ctx, _ := utiltesting.ContextWithLog(t)
+
+			j := (*SparkApplication)(tc.sparkApp)
+
+			var objs []client.Object
+			for _, p := range tc.pods {
+				objs = append(objs, p)
+			}
+			for _, ac := range tc.admissionChecks {
+				objs = append(objs, ac)
+			}
+			for _, wl := range tc.workloads {
+				objs = append(objs, wl)
+			}
+			c := utiltesting.NewClientBuilder(sparkappv1beta2.AddToScheme).
+				WithIndex(&kueue.Workload{}, indexer.OwnerReferenceIndexKey(gvk), indexer.WorkloadOwnerIndexFunc(gvk)).
+				WithObjects(objs...).
+				Build()
 
 			got, err := j.numExecutors(ctx, c)
 			if err != nil {

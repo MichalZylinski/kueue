@@ -18,6 +18,7 @@ package sparkapplication
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -34,6 +35,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
 
@@ -133,7 +137,21 @@ func (j *SparkApplication) numExecutors(ctx context.Context, c client.Client) (i
 		return floor, nil
 	}
 
-	observed, err := j.observedExecutorCount(ctx, c)
+	delegated, err := j.isMultiKueueDelegated(ctx, c)
+	if err != nil {
+		return 0, err
+	}
+
+	var observed int32
+	if delegated {
+		// The driver and its executors run on the worker cluster, not here:
+		// there are no local executor pods to observe. Use the demand the
+		// worker last synced back onto this object instead (see the
+		// SparkApplication MultiKueue adapter's SyncJob).
+		observed, err = j.mirroredExecutorCount()
+	} else {
+		observed, err = j.observedExecutorCount(ctx, c)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -176,6 +194,61 @@ func (j *SparkApplication) observedExecutorCount(ctx context.Context, c client.C
 		count++
 	}
 	return count, nil
+}
+
+// isMultiKueueDelegated reports whether this SparkApplication is the
+// management-cluster copy of an application admitted through MultiKueue,
+// meaning the driver and its executors actually run on a worker cluster and
+// no local executor pods will ever exist to observe. It is derived fresh
+// from the workload's current admission-check state on every call, rather
+// than from a locally-stamped marker, so that it correctly flips back to
+// false once the workload is no longer MultiKueue-delegated (e.g. after
+// eviction) instead of permanently pinning numExecutors to the mirrored
+// annotation.
+func (j *SparkApplication) isMultiKueueDelegated(ctx context.Context, c client.Client) (bool, error) {
+	if !features.Enabled(features.MultiKueue) {
+		return false, nil
+	}
+
+	workloads, err := workloadslicing.FindNotFinishedWorkloads(ctx, c, (*sparkv1beta2.SparkApplication)(j), gvk)
+	if err != nil {
+		return false, fmt.Errorf("failed to list workloads for sparkapplication: %w", err)
+	}
+
+	for i := range workloads {
+		skip, err := admissioncheck.ShouldSkipLocalExecution(ctx, c, &workloads[i])
+		if err != nil {
+			return false, err
+		}
+		if skip {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// mirroredExecutorCount returns the executor PodSet count most recently
+// synced from the remote worker cluster's copy of
+// SparkApplicationPodSetReplicaSizesAnnotation (see the SparkApplication
+// MultiKueue adapter's SyncJob), or 0 if the annotation is absent or has no
+// executor entry yet.
+func (j *SparkApplication) mirroredExecutorCount() (int32, error) {
+	replicaSizes := j.Annotations[SparkApplicationPodSetReplicaSizesAnnotation]
+	if replicaSizes == "" {
+		return 0, nil
+	}
+
+	var sizes []jobframework.PodSetReplicaSize
+	if err := json.Unmarshal([]byte(replicaSizes), &sizes); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal PodSet replica sizes: %w", err)
+	}
+
+	for _, size := range sizes {
+		if size.Name == executorPodSetName {
+			return size.Count, nil
+		}
+	}
+	return 0, nil
 }
 
 func (j *SparkApplication) buildDriverPodTemplateSpec() (*corev1.PodTemplateSpec, error) {

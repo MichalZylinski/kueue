@@ -248,6 +248,22 @@ func (w *SparkApplicationWrapper) Queue(lq string) *SparkApplicationWrapper {
 	return w.Label(controllerconstants.QueueLabel, lq)
 }
 
+// PrebuiltWorkloadLabel sets the prebuilt workload label.
+func (w *SparkApplicationWrapper) PrebuiltWorkloadLabel(prebuiltWorkload string) *SparkApplicationWrapper {
+	return w.Label(controllerconstants.PrebuiltWorkloadLabel, prebuiltWorkload)
+}
+
+// PrebuiltWorkloadAnnotation sets the prebuilt workload annotation.
+func (w *SparkApplicationWrapper) PrebuiltWorkloadAnnotation(prebuiltWorkload string) *SparkApplicationWrapper {
+	return w.Annotation(controllerconstants.PrebuiltWorkloadAnnotation, prebuiltWorkload)
+}
+
+// AppState sets the application state in status.
+func (w *SparkApplicationWrapper) AppState(state sparkappv1beta2.ApplicationStateType) *SparkApplicationWrapper {
+	w.Status.AppState.State = state
+	return w
+}
+
 // Obj returns the inner SparkApplication.
 func (w *SparkApplicationWrapper) Obj() *sparkappv1beta2.SparkApplication {
 	return &w.SparkApplication
