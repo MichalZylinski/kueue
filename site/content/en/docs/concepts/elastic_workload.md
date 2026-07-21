@@ -73,6 +73,19 @@ metadata:
     kueue.x-k8s.io/elastic-job: "true"
 ```
 
+[Topology Aware Scheduling](/docs/concepts/topology_aware_scheduling) integration for
+elastic workloads is a separate, alpha-level feature flag, off by default:
+
+```yaml
+ElasticJobsViaWorkloadSlicesWithTAS: true
+```
+
+With both flags enabled, `unconstrained` topology mode is supported for elastic
+workloads (see [Limitations](#limitations) below for the current scope). Without
+`ElasticJobsViaWorkloadSlicesWithTAS`, TAS assignment for an elastic workload's pods
+still happens, but without slice-aware locality — a scale-up is not guaranteed to land
+in the same topology domain as the workload's existing pods.
+
 ## Limitations
 
 * Currently available only for the following workloads: 
@@ -89,6 +102,12 @@ metadata:
       Error from server (Forbidden): error when applying patch:
       error when patching "job.yaml": admission webhook "vjob.kb.io" denied the request: spec.parallelism: Forbidden: cannot change when partial admission is enabled and the job is not suspended
       ```
-* When scaling up a previously admitted job the new workload must reuse the originally assigned flavor, even if other eligible flavors have available capacity.
+* When scaling up a previously admitted job the new workload must reuse the originally assigned flavor
+  (sticky flavor), even if other eligible flavors have available capacity. There is currently no
+  override for this; see [issue #5897](https://github.com/kubernetes-sigs/kueue/issues/5897) for an
+  exploration of alternative designs.
 * No Multikueue support.
-* No Topology-Aware Scheduling (TAS) support. 
+* Topology-Aware Scheduling support for elastic workloads is alpha-level, gated separately by
+  `ElasticJobsViaWorkloadSlicesWithTAS` (off by default), and covers only `unconstrained` topology
+  mode. A workload with a required or preferred topology annotation is rejected when both the elastic
+  and elastic-TAS feature gates are enabled.

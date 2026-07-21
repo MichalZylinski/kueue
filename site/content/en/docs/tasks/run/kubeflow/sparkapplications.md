@@ -134,9 +134,16 @@ and `spark.kubernetes.allocation.batch.size` in the
 ### Limitations
 
 - MultiKueue is not yet supported for elastic SparkApplications.
-- Only `unconstrained` [Topology Aware Scheduling](/docs/concepts/topology_aware_scheduling) mode is
-  supported; an elastic SparkApplication with a required or preferred topology annotation on the
-  driver or executor is rejected.
+- [Topology Aware Scheduling](/docs/concepts/topology_aware_scheduling) for elastic SparkApplications
+  requires the separate, alpha-level `ElasticJobsViaWorkloadSlicesWithTAS` feature gate (off by
+  default) in addition to `ElasticJobsViaWorkloadSlices`, and only supports `unconstrained` topology
+  mode — a required or preferred topology annotation on the driver or executor is rejected. This
+  applies to every framework that supports elastic scaling, not something specific to Spark; see
+  [Elastic Workloads](/docs/concepts/elastic_workload#limitations) for the general behavior.
+- Scaling up reuses the flavor originally assigned to the application (sticky flavor) — a scale-up
+  that no longer fits that flavor stays pending even if a different flavor has capacity. This is a
+  general property of elastic workloads across all frameworks, not Spark-specific; see
+  [Elastic Workloads](/docs/concepts/elastic_workload#limitations).
 - Editing `spec.executor.instances` remains a full application restart (the spark-operator resubmits
   the application on any spec change) — it is not part of elastic scaling.
 
