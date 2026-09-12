@@ -1,0 +1,40 @@
+title: Lifespan Aware Scheduling
+kep-number: 15200
+authors:
+  - "@MichalZylinski"
+status: implementable
+creation-date: 2026-09-09
+reviewers:
+  - "@mimowo"
+  - "@alculquicondor"
+  - "@tenzen-y"
+  - "@kshalot"
+approvers:
+  - "@mimowo"
+  - "@alculquicondor"
+
+see-also:
+  - "/keps/1432-admission-check-per-resource-flavor"
+  - "/keps/3125-maximum-execution-time"
+  - "/keps/2724-topology-aware-scheduling"
+  - "/keps/10076-quota-release-strategy"
+
+stage: alpha
+
+latest-milestone: "v0.21"
+
+milestone:
+  alpha: "v0.21"
+  beta: "v0.22"
+  stable: "v0.24"
+
+feature-gates:
+  - name: LifespanAwareScheduling
+disable-supported: true
+
+metrics:
+  - kueue_lifespan_admissions_total
+  - kueue_lifespan_fallbacks_total
+  - kueue_lifespan_rejections_total
+  - kueue_lifespan_unlabeled_nodes
+  - kueue_node_remaining_lifespan_seconds
