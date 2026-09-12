@@ -12,6 +12,7 @@
 | [kueue-e2e-cluster-singlecluster](kueue-e2e-cluster-singlecluster/SKILL.md) | "spin up an e2e cluster", "get a kind cluster ready for e2e", single-cluster e2e suite setup (baseline, extended, sequential, TAS, cert-manager, DRA) |
 | [kueue-e2e-cluster-multikueue](kueue-e2e-cluster-multikueue/SKILL.md) | "spin up MultiKueue e2e clusters", "set up manager/worker kind clusters", MultiKueue e2e suite setup (baseline, extended, sequential, DRA) |
 | [reviewer/](reviewer/README.md) | "review this PR", "review this code", "evaluate this diff", "score these commits", "review the changes between", "code quality evaluation", any code review of kueue changes |
+| [kueue-kep-authoring](kueue-kep-authoring/SKILL.md) | "write a KEP", "author a KEP", "review this KEP", "create KEP", "KEP guidelines", Kueue enhancement proposal authoring and review |
 
 ---
 
@@ -40,3 +41,5 @@
 @kueue-e2e-cluster-multikueue/SKILL.md
 
 @reviewer/README.md
+
+@kueue-kep-authoring/SKILL.md
