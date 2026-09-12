@@ -1,0 +1,105 @@
+apiVersion: kueue.x-k8s.io/v1alpha1
+kind: NodeLifespanConfig
+metadata:
+  name: "default"
+spec:
+  sources:
+  # Example: a cloud provider that leases capacity for a fixed duration,
+  # counted from the moment the node is created.
+  - name: leased-capacity
+    appliesTo:
+      matchLabels:
+        example.com/leased: "true"
+    mode: RelativeToNodeCreation
+    from:
+      label: example.com/max-run-duration-seconds
+    format: DurationSeconds
+  # Example: a cloud provider that publishes an absolute maintenance
+  # (evacuation) deadline on the nodes it is about to reclaim.
+  - name: planned-maintenance
+    appliesTo:
+      matchExpressions:
+      - key: example.com/scheduled-maintenance-time
+        operator: Exists
+    mode: Absolute
+    from:
+      label: example.com/scheduled-maintenance-time
+    format: UnixEpochSeconds
+---
+apiVersion: kueue.x-k8s.io/v1alpha1
+kind: LifespanPolicy
+metadata:
+  name: "default-lifespan-policy"
+spec:
+  safetyBuffer: 30m
+  minimumWindow: 0s
+  fallbackPolicy: AllowWithDefault
+  defaultDuration: 2h
+  expiringTaintThreshold: 15m
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: "lifespan-aware-scheduling"
+spec:
+  controllerName: kueue.x-k8s.io/lifespan-aware-scheduling
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: LifespanPolicy
+    name: "default-lifespan-policy"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: "leased-gpu"
+spec:
+  nodeLabels:
+    example.com/leased: "true"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: "on-demand-gpu"
+spec:
+  nodeLabels:
+    example.com/leased: "false"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: "lifespan-cluster-queue"
+spec:
+  namespaceSelector: {} # match all.
+  resourceGroups:
+  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    flavors:
+    # Flavor order matters: the time-bounded flavor is tried first, and the
+    # durable one is used as a fallback when the runway is insufficient.
+    - name: "leased-gpu"
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 64
+    - name: "on-demand-gpu"
+      resources:
+      - name: "cpu"
+        nominalQuota: 50
+      - name: "memory"
+        nominalQuota: 200Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 32
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: "lifespan-aware-scheduling"
+      onFlavors: ["leased-gpu"] # only the time-bounded flavor is lifespan-managed.
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  namespace: "default"
+  name: "lifespan-user-queue"
+spec:
+  clusterQueue: "lifespan-cluster-queue"

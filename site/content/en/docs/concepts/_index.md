@@ -59,6 +59,11 @@ in a data center. A `Topology` defines levels of organizational units
 A mechanism allowing to schedule Workloads optimizing Pod placement for
 network throughput between the Pods.
 
+### [Lifespan-Aware Scheduling](/docs/concepts/lifespan_aware_scheduling)
+
+A mechanism allowing to schedule Workloads onto time-bounded capacity only when
+the nodes have enough remaining operational time to run them to completion.
+
 ### [Dynamic Resource Allocation](/docs/concepts/dynamic_resource_allocation)
 
 Quota management for workloads using Kubernetes
