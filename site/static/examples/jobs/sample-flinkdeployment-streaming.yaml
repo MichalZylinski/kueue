@@ -1,0 +1,31 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: flink-streaming-job
+  labels:
+    kueue.x-k8s.io/queue-name: user-queue
+    kueue.x-k8s.io/priority-class: high-priority
+spec:
+  image: flink:1.18
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+    state.savepoints.dir: file:///flink-data/savepoints
+    state.checkpoints.dir: file:///flink-data/checkpoints
+    execution.checkpointing.interval: 60s
+  serviceAccount: flink
+  jobManager:
+    replicas: 1
+    resource:
+      cpu: 1.0
+      memory: "2048m"
+  taskManager:
+    replicas: 2
+    resource:
+      cpu: 2.0
+      memory: "4096m"
+  job:
+    jarURI: local:///opt/flink/examples/streaming/StateMachineExample.jar
+    parallelism: 4
+    upgradeMode: savepoint
+    state: running

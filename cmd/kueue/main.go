@@ -209,7 +209,7 @@ func main() {
 	}
 
 	var metricsCertWatcher *certwatcher.CertWatcher
-	if cfg.InternalCertManagement == nil || !*cfg.InternalCertManagement.Enable {
+	if metricsServerOptions.BindAddress != "0" && (cfg.InternalCertManagement == nil || !*cfg.InternalCertManagement.Enable) {
 		metricsCertPath := "/etc/kueue/metrics/certs"
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath)

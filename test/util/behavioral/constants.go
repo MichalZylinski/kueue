@@ -74,6 +74,7 @@ var (
 	AppWrapperCrds           = filepath.Join(ProjectBaseDir, "dep-crds", "appwrapper-crds")
 	RayOperatorCrds          = filepath.Join(ProjectBaseDir, "dep-crds", "ray-operator-crds")
 	SparkOperatorCrds        = filepath.Join(ProjectBaseDir, "dep-crds", "spark-operator-crds")
+	FlinkOperatorCrds        = filepath.Join(ProjectBaseDir, "dep-crds", "flink-operator-crds")
 	WebhookPath              = filepath.Join(ProjectBaseDir, "config", "components", "webhook")
 	ClusterProfileCrds       = filepath.Join(ProjectBaseDir, "dep-crds", "clusterprofile")
 )

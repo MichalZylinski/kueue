@@ -420,6 +420,9 @@ const (
 	// Enables the Kubeflow's SparkApplication integration
 	SparkApplicationIntegration featuregate.Feature = "SparkApplicationIntegration"
 
+	// Enables the Apache Flink FlinkDeployment integration
+	FlinkDeploymentIntegration featuregate.Feature = "FlinkDeploymentIntegration"
+
 	// owner: @kshalot
 	//
 	// issue: https://github.com/kubernetes-sigs/kueue/issues/8303
@@ -1219,6 +1222,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	SparkApplicationIntegration: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	FlinkDeploymentIntegration: {
+		{Version: version.MustParse("0.21"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	MultiKueueOrchestratedPreemption: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
