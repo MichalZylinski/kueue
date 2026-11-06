@@ -47,6 +47,7 @@ As a batch user, you can learn how to:
 - [Submit Kueue jobs from Python](run/python_jobs).
 - [Run a Kueue managed plain Pod](run/plain_pods).
 - [Run a Kueue managed JobSet](run/jobsets).
+- [Run a Kueue managed Apache Flink Deployment](run/flinkdeployments).
 - [Run workloads with DRA devices](run/dra).
 - [Run workloads with Topology-Aware Scheduling](run/topology_aware_scheduling).
 - [Submit jobs to MultiKueue](run/multikueue).
