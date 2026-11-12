@@ -79,6 +79,7 @@ integrations:
   - "workload.codeflare.dev/appwrapper"
   - "trainer.kubeflow.org/trainjob"
 #  - "sparkoperator.k8s.io/sparkapplication"
+#  - "flink.apache.org/flinkdeployment"
   - "pod"
   - "deployment"
   - "statefulset"

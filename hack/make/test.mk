@@ -146,7 +146,7 @@ test-fuzz: ## Run all fuzz tests with fuzzing enabled, FUZZTIME per target.
 
 ## Label Taxonomy:
 ##   Controllers: controller:workload, controller:localqueue, controller:clusterqueue, controller:admissioncheck, controller:resourceflavor, controller:provisioning
-##   Job Types: job:batch, job:pod, job:jobset, job:pytorch, job:tensorflow, job:mpi, job:paddle, job:xgboost, job:jax, job:train, job:ray, job:appwrapper, job:sparkapplication
+##   Job Types: job:batch, job:pod, job:jobset, job:pytorch, job:tensorflow, job:mpi, job:paddle, job:xgboost, job:jax, job:train, job:ray, job:appwrapper, job:sparkapplication, job:flinkdeployment
 ##   Features: feature:tas, feature:multikueue, feature:provisioning, feature:fairsharing, feature:admissionfairsharing
 ##   Areas: area:core, area:jobs, area:admissionchecks, area:multikueue
 ##

@@ -420,7 +420,9 @@ const (
 	// Enables the Kubeflow's SparkApplication integration
 	SparkApplicationIntegration featuregate.Feature = "SparkApplicationIntegration"
 
-	// Enables the Apache Flink FlinkDeployment integration
+	// owner: @MichalZylinski
+	//
+	// Enables the Apache Flink FlinkDeployment integration.
 	FlinkDeploymentIntegration featuregate.Feature = "FlinkDeploymentIntegration"
 
 	// owner: @kshalot

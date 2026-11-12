@@ -17,17 +17,36 @@ limitations under the License.
 package v1beta1
 
 import (
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects
+	// SchemeGroupVersion is the group version used to register FlinkDeployment objects.
 	SchemeGroupVersion = schema.GroupVersion{Group: "flink.apache.org", Version: "v1beta1"}
-	SchemeBuilder      = runtime.NewSchemeBuilder(addKnownTypes)
-	AddToScheme        = SchemeBuilder.AddToScheme
+	// SchemeBuilder registers the FlinkDeployment types with a runtime.Scheme.
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
+	// AddToScheme adds the FlinkDeployment types to a runtime.Scheme.
+	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+func init() {
+	// FlinkConfiguration, PodTemplateSpec, and Quantity carry unexported raw JSON fields;
+	// apimachinery's semantic deep-equality panics on unexported struct fields unless custom
+	// equalities are registered.
+	utilruntime.Must(apiequality.Semantic.AddFunc(func(a, b FlinkConfiguration) bool {
+		return a.Equal(b)
+	}))
+	utilruntime.Must(apiequality.Semantic.AddFunc(func(a, b PodTemplateSpec) bool {
+		return a.Equal(b)
+	}))
+	utilruntime.Must(apiequality.Semantic.AddFunc(func(a, b Quantity) bool {
+		return a.Equal(b)
+	}))
+}
 
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,

@@ -43,6 +43,9 @@ APPWRAPPER_VERSION = $(shell $(GO_CMD) list -m -f "{{.Version}}" github.com/proj
 LEADERWORKERSET_VERSION = $(shell $(GO_CMD) list -m -f "{{.Version}}" sigs.k8s.io/lws)
 CLUSTERPROFILE_VERSION = $(shell $(GO_CMD) list -m -f "{{.Version}}" sigs.k8s.io/cluster-inventory-api)
 SPARKOPERATOR_VERSION = $(shell $(GO_CMD) list -m -f "{{.Version}}" github.com/kubeflow/spark-operator/v2)
+# Pinned to the apache/flink-kubernetes-operator release-1.16.1 tag commit.
+FLINKOPERATOR_VERSION ?= 1c895a326b3306e29d57334041d685c5cd9194c9
+FLINKOPERATOR_CRD_SHA256 ?= e3f4c40707fd3e0db9676eddcbb2b80de79c5f743ec5fcff4a6c3d27bca05f0d
 CERTMANAGER_VERSION=$(shell $(GO_CMD) list -m -f "{{.Version}}" github.com/cert-manager/cert-manager)
 DRA_EXAMPLE_DRIVER_VERSION = $(shell cd $(TOOLS_DIR); $(GO_CMD) list -m -f "{{.Version}}" sigs.k8s.io/dra-example-driver)
 
@@ -330,8 +333,26 @@ spark-operator-crd: ## Copy the CRDs from the spark-operator to the dep-crds dir
 	mkdir -p $(EXTERNAL_CRDS_DIR)/spark-operator-crds/
 	cp -rf $(SPARKOPERATOR_ROOT)/config/crd/bases/* $(EXTERNAL_CRDS_DIR)/spark-operator-crds/
 
+.PHONY: flink-operator-crd
+flink-operator-crd: ## Download the FlinkDeployment CRD from the flink-kubernetes-operator to the dep-crds directory.
+	@echo "→ Downloading the FlinkDeployment CRD ($(FLINKOPERATOR_VERSION)) to the dep-crds directory..."
+	@command -v curl >/dev/null || { echo "curl is required to download flink-operator-crd" >&2; exit 1; }
+	@{ command -v sha256sum >/dev/null || command -v shasum >/dev/null; } || { echo "sha256sum or shasum is required to verify flink-operator-crd" >&2; exit 1; }
+	@tmp_dir=$$(mktemp -d); \
+	trap 'rm -r "$$tmp_dir"' EXIT; \
+	$(NETWORK_RETRY) curl -fsSL --connect-timeout 10 --max-time 300 \
+		-o "$$tmp_dir/flinkdeployments.flink.apache.org.yaml" \
+		"https://raw.githubusercontent.com/apache/flink-kubernetes-operator/$(FLINKOPERATOR_VERSION)/helm/flink-kubernetes-operator/crds/flinkdeployments.flink.apache.org-v1.yml"; \
+	if command -v sha256sum >/dev/null; then \
+		(cd "$$tmp_dir" && echo "$(FLINKOPERATOR_CRD_SHA256)  flinkdeployments.flink.apache.org.yaml" | sha256sum --check -); \
+	else \
+		(cd "$$tmp_dir" && echo "$(FLINKOPERATOR_CRD_SHA256)  flinkdeployments.flink.apache.org.yaml" | shasum -a 256 --check -); \
+	fi; \
+	mkdir -p $(EXTERNAL_CRDS_DIR)/flink-operator-crds/; \
+	install -m 0644 "$$tmp_dir/flinkdeployments.flink.apache.org.yaml" $(EXTERNAL_CRDS_DIR)/flink-operator-crds/flinkdeployments.flink.apache.org.yaml
+
 .PHONY: dep-crds
-dep-crds: mpi-operator-crd kf-training-operator-crd kf-trainer-crd kf-trainer-runtimes ray-operator-crd jobset-operator-crd leaderworkerset-operator-crd cluster-autoscaler-crd appwrapper-crd appwrapper-manifests kf-training-operator-manifests ray-operator-manifests kf-trainer-manifests clusterprofile-crd spark-operator-crd ## Copy the CRDs from the external operators to the dep-crds directory.
+dep-crds: mpi-operator-crd kf-training-operator-crd kf-trainer-crd kf-trainer-runtimes ray-operator-crd jobset-operator-crd leaderworkerset-operator-crd cluster-autoscaler-crd appwrapper-crd appwrapper-manifests kf-training-operator-manifests ray-operator-manifests kf-trainer-manifests clusterprofile-crd spark-operator-crd flink-operator-crd ## Copy the CRDs from the external operators to the dep-crds directory.
 	@echo "Copying CRDs from external operators to dep-crds directory"
 
 KUEUECTL_DOCS = $(BIN_DIR)/kueuectl-docs

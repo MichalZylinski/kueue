@@ -178,7 +178,7 @@ generate: generate-mocks generate-apiref generate-code generate-kueuectl-docs ge
 
 .PHONY: generate-code
 generate-code: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations and client-go libraries.
-	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./apis/..."
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./apis/...;./pkg/controller/jobs/flinkdeployment/apis/..."
 	$(TOOLS_DIR)/code-generator/generate.sh $(GO_CMD)
 
 .PHONY: generate-mocks

@@ -598,6 +598,7 @@ type Integrations struct {
 	//  - "trainer.kubeflow.org/trainjob"
 	//  - "workload.codeflare.dev/appwrapper"
 	//  - "sparkoperator.k8s.io/sparkapplication"
+	//  - "flink.apache.org/flinkdeployment"
 	//  - "pod"
 	//  - "deployment"
 	//  - "statefulset"

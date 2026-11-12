@@ -59,6 +59,7 @@ import (
 	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/client-go/clientset/versioned/scheme"
+	flinkv1beta1 "sigs.k8s.io/kueue/pkg/controller/jobs/flinkdeployment/apis/v1beta1"
 	"sigs.k8s.io/kueue/test/util/behavioral"
 )
 
@@ -193,6 +194,9 @@ func (f *Framework) SetupClient(cfg *rest.Config) (context.Context, client.WithW
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	err = sparkv1beta2.AddToScheme(f.scheme)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	err = flinkv1beta1.AddToScheme(f.scheme)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	k8sClient, err := client.NewWithWatch(cfg, client.Options{Scheme: f.scheme})

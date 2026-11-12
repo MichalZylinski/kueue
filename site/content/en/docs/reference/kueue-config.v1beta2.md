@@ -990,6 +990,7 @@ Possible options:</p>
 <li>&quot;trainer.kubeflow.org/trainjob&quot;</li>
 <li>&quot;workload.codeflare.dev/appwrapper&quot;</li>
 <li>&quot;sparkoperator.k8s.io/sparkapplication&quot;</li>
+<li>&quot;flink.apache.org/flinkdeployment&quot;</li>
 <li>&quot;pod&quot;</li>
 <li>&quot;deployment&quot;</li>
 <li>&quot;statefulset&quot;</li>

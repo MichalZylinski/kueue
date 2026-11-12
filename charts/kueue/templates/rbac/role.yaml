@@ -181,6 +181,30 @@ rules:
       - update
       - watch
   - apiGroups:
+      - flink.apache.org
+    resources:
+      - flinkdeployments
+    verbs:
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - flink.apache.org
+    resources:
+      - flinkdeployments/finalizers
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - flink.apache.org
+    resources:
+      - flinkdeployments/status
+    verbs:
+      - get
+  - apiGroups:
       - flowcontrol.apiserver.k8s.io
     resources:
       - flowschemas

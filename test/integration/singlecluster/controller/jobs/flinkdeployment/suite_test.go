@@ -33,8 +33,10 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	jobcontrollers "sigs.k8s.io/kueue/pkg/controller/jobs"
 	workloadflinkdeployment "sigs.k8s.io/kueue/pkg/controller/jobs/flinkdeployment"
-	flinkv1beta1 "sigs.k8s.io/kueue/pkg/controller/jobs/flinkdeployment/apis/v1beta1"
+	"sigs.k8s.io/kueue/pkg/controller/tas"
+	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
@@ -60,10 +62,10 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	fwk = &framework.Framework{
 		DepCRDPaths: []string{behavioral.FlinkOperatorCrds},
+		WebhookPath: behavioral.WebhookPath,
 	}
 	cfg = fwk.Init()
 	ctx, k8sClient = fwk.SetupClient(cfg)
-	gomega.Expect(flinkv1beta1.AddToScheme(k8sClient.Scheme())).To(gomega.Succeed())
 })
 
 var _ = ginkgo.AfterSuite(func() {
@@ -73,25 +75,29 @@ var _ = ginkgo.AfterSuite(func() {
 func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 	ginkgo.GinkgoHelper()
 	return func(ctx context.Context, mgr manager.Manager) {
+		integrationManager := jobcontrollers.NewIntegrationManager()
+		integrationManager.EnableIntegration(workloadflinkdeployment.FrameworkName)
+		allOpts := append([]jobframework.Option{jobframework.WithIntegrationManager(integrationManager)}, opts...)
+
 		reconciler, err := workloadflinkdeployment.NewReconciler(
 			ctx,
 			mgr.GetClient(),
 			mgr.GetFieldIndexer(),
 			mgr.GetEventRecorder(constants.JobControllerName),
-			opts...)
+			allOpts...)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = workloadflinkdeployment.SetupIndexes(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = reconciler.SetupWithManager(mgr)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = workloadflinkdeployment.SetupWebhook(mgr, opts...)
+		err = workloadflinkdeployment.SetupWebhook(mgr, allOpts...)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		failedWebhook, err := webhooks.Setup(mgr, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
 	}
 }
 
-func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetup {
+func managerAndSchedulerSetup(setupTASControllers bool, opts ...jobframework.Option) framework.ManagerSetup {
 	ginkgo.GinkgoHelper()
 	return func(ctx context.Context, mgr manager.Manager) {
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
@@ -101,31 +107,40 @@ func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetu
 		preemptionExpectations := preemptexpectations.New()
 		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
 		queues := integration.NewManager(ctx, mgr.GetClient(), cCache, queueOptions...)
-		opts = append(opts, jobframework.WithQueues(queues))
+
+		configuration := &config.Configuration{}
+		mgr.GetScheme().Default(configuration)
+
+		allOpts := append([]jobframework.Option{
+			jobframework.WithCache(cCache),
+			jobframework.WithQueues(queues),
+		}, opts...)
+		managerSetup(allOpts...)(ctx, mgr)
 
 		failedCtrl, err := core.SetupControllers(
 			mgr,
 			queues,
 			cCache,
-			&config.Configuration{},
+			configuration,
 			core.SetupControllersOpts{PreemptionExpectations: preemptionExpectations},
 		)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
-		failedWebhook, err := webhooks.Setup(mgr, nil)
-		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
+		if setupTASControllers {
+			failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, configuration, nil)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
 
-		err = workloadflinkdeployment.SetupIndexes(ctx, mgr.GetFieldIndexer())
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		reconciler, err := workloadflinkdeployment.NewReconciler(ctx, mgr.GetClient(), mgr.GetFieldIndexer(),
-			mgr.GetEventRecorder(constants.JobControllerName), opts...)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = reconciler.SetupWithManager(mgr)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = workloadflinkdeployment.SetupWebhook(mgr, opts...)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			err = tasindexer.SetupIndexes(ctx, mgr.GetFieldIndexer())
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 
-		sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorder(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
+		sched := scheduler.New(
+			queues,
+			cCache,
+			mgr.GetClient(),
+			mgr.GetEventRecorder(constants.AdmissionName),
+			scheduler.WithPreemptionExpectations(preemptionExpectations),
+		)
 		err = mgr.Add(sched)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
