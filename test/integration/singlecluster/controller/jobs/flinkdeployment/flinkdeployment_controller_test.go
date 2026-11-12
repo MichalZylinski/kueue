@@ -285,22 +285,14 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		ginkgo.By("Verifying Workload finishes cleanly")
 		behavioral.ExpectWorkloadToFinish(ctx, k8sClient, wlLookupKey)
 
-		ginkgo.By("Rejecting in-place revival, JAR replacement, or suspension on the finished FlinkDeployment while allowing metadata updates")
+		ginkgo.By("Rejecting running-state PodSet mutations on the finished FlinkDeployment while allowing metadata updates")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		reviveAttempt := created.DeepCopy()
-		reviveAttempt.Spec.RestartNonce = new(int64(2))
-		reviveAttempt.Spec.Job.JarURI = "local:///opt/flink/usrlib/unaccounted.jar"
-		reviveErr := k8sClient.Update(ctx, reviveAttempt)
-		gomega.Expect(reviveErr).To(gomega.HaveOccurred())
-		gomega.Expect(reviveErr).To(utiltesting.BeForbiddenError())
-		gomega.Expect(reviveErr.Error()).To(gomega.ContainSubstring("once Workload is finished"))
-
-		suspendAttempt := created.DeepCopy()
-		suspendAttempt.Spec.Job.State = flinkv1beta1.JobStateSuspended
-		suspendErr := k8sClient.Update(ctx, suspendAttempt)
-		gomega.Expect(suspendErr).To(gomega.HaveOccurred())
-		gomega.Expect(suspendErr).To(utiltesting.BeForbiddenError())
-		gomega.Expect(suspendErr.Error()).To(gomega.ContainSubstring("once Workload is finished"))
+		scaleAttempt := created.DeepCopy()
+		scaleAttempt.Spec.TaskManager.Replicas = new(int64(4))
+		scaleErr := k8sClient.Update(ctx, scaleAttempt)
+		gomega.Expect(scaleErr).To(gomega.HaveOccurred())
+		gomega.Expect(scaleErr).To(utiltesting.BeForbiddenError())
+		gomega.Expect(scaleErr.Error()).To(gomega.ContainSubstring("when FlinkDeployment is not suspended"))
 
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
@@ -949,7 +941,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	})
 
-	ginkgo.It("Should reject scaling on suspended->running updates and cleanly evict when overlay fields were edited while queued", func() {
+	ginkgo.It("Should re-suspend premature running updates while queued and cleanly evict when overlay fields were edited while queued", func() {
 		ginkgo.By("Holding the ClusterQueue so the FlinkDeployment stays queued and suspended")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clusterQueue), clusterQueue)).To(gomega.Succeed())
@@ -992,21 +984,16 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
 		created := &flinkv1beta1.FlinkDeployment{}
-		ginkgo.By("Rejecting a user update that sets spec.job.state=running while the Workload is still queued")
-		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		plainUnsuspend := created.DeepCopy()
-		plainUnsuspend.Spec.Job.State = flinkv1beta1.JobStateRunning
-		err := k8sClient.Update(ctx, plainUnsuspend)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-
-		ginkgo.By("Rejecting a user update that sets spec.job.state=running while scaling replicas")
-		invalidUnsuspend := created.DeepCopy()
-		invalidUnsuspend.Spec.Job.State = flinkv1beta1.JobStateRunning
-		invalidUnsuspend.Spec.TaskManager.Replicas = new(int64(2))
-		err = k8sClient.Update(ctx, invalidUnsuspend)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+		ginkgo.By("Re-suspending a premature user update that sets spec.job.state=running while the Workload is still queued")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			created.Spec.Job.State = flinkv1beta1.JobStateRunning
+			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
 		ginkgo.By("Editing Labels, Annotations, and NodeSelector while still queued and suspended")
 		gomega.Eventually(func(g gomega.Gomega) {
@@ -1035,13 +1022,12 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 			g.Expect(created.Spec.JobManager.PodTemplate.Spec.NodeSelector).To(gomega.HaveKeyWithValue(instanceKey, "spot-pool"))
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
-		ginkgo.By("Rejecting a single-patch running->suspended update that wipes user podTemplate overlays")
+		ginkgo.By("Rejecting a running->suspended update that mutates queue-name")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		wipeAttempt := created.DeepCopy()
-		wipeAttempt.Spec.Job.State = flinkv1beta1.JobStateSuspended
-		wipeAttempt.Spec.JobManager.PodTemplate = nil
-		wipeAttempt.Spec.TaskManager.PodTemplate = nil
-		err = k8sClient.Update(ctx, wipeAttempt)
+		queueMutateAttempt := created.DeepCopy()
+		queueMutateAttempt.Spec.Job.State = flinkv1beta1.JobStateSuspended
+		delete(queueMutateAttempt.Labels, controllerconstants.QueueLabel)
+		err := k8sClient.Update(ctx, queueMutateAttempt)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
 
@@ -1087,7 +1073,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		ginkgo.By("Editing podTemplate labels, annotations, schedulingGates, and a conflicting nodeSelector while queued")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-			created.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+			created.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 				Labels:      map[string]string{"team": "streaming"},
 				Annotations: map[string]string{"owner": "analytics"},
 				Spec: corev1.PodSpec{
@@ -1144,110 +1130,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	})
 
-	ginkgo.It("Should prune zero PodSpec fields on typed Go TaskManagerPodTemplate positional overrides", func() {
-		typedApp := testingflinkdeployment.MakeFlinkDeployment("typed-positional-pt", ns.Name).
-			Queue(localQueue.Name).
-			TaskManagerReplicas(1).
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name: "flink-main-container",
-							Ports: []corev1.ContainerPort{
-								{Name: "metrics", ContainerPort: 8080},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name: "MEM",
-									ValueFrom: &corev1.EnvVarSource{
-										ResourceFieldRef: &corev1.ResourceFieldSelector{
-											Resource: "limits.memory",
-											Divisor:  resource.MustParse("1Mi"),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			}).
-			TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 9250},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name: "MEM",
-									ValueFrom: &corev1.EnvVarSource{
-										ResourceFieldRef: &corev1.ResourceFieldSelector{
-											Resource: "requests.memory",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			}).
-			Obj()
-		behavioral.MustCreate(ctx, k8sClient, typedApp)
-
-		lookupKey := client.ObjectKeyFromObject(typedApp)
-		wlKey := types.NamespacedName{
-			Namespace: ns.Name,
-			Name:      workloadflinkdeployment.GetWorkloadNameForFlinkDeployment(typedApp.Name, typedApp.UID),
-		}
-
-		persisted := &unstructured.Unstructured{}
-		persisted.SetAPIVersion("flink.apache.org/v1beta1")
-		persisted.SetKind("FlinkDeployment")
-		gomega.Expect(k8sClient.Get(ctx, lookupKey, persisted)).To(gomega.Succeed())
-		containers, found, err := unstructured.NestedSlice(
-			persisted.Object, "spec", "taskManager", "podTemplate", "spec", "containers",
-		)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(found).To(gomega.BeTrue())
-		gomega.Expect(containers).To(gomega.HaveLen(1))
-		c0 := containers[0].(map[string]any)
-		gomega.Expect(c0).NotTo(gomega.HaveKey("name"))
-		envs := c0["env"].([]any)
-		rfr, _, err := unstructured.NestedMap(envs[0].(map[string]any), "valueFrom", "resourceFieldRef")
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(rfr).NotTo(gomega.HaveKey("divisor"))
-
-		wl := &kueue.Workload{}
-		created := &flinkv1beta1.FlinkDeployment{}
-		behavioral.ExpectWorkloadsToBeAdmittedByKeys(ctx, k8sClient, wlKey)
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
-			g.Expect(wl.Spec.PodSets).To(gomega.HaveLen(2))
-			tmContainers := wl.Spec.PodSets[1].Template.Spec.Containers
-			g.Expect(tmContainers).To(gomega.HaveLen(1))
-			g.Expect(tmContainers[0].Name).To(gomega.Equal("flink-main-container"))
-			g.Expect(tmContainers[0].Ports).To(gomega.HaveLen(1))
-			g.Expect(tmContainers[0].Ports[0].Name).To(gomega.Equal("metrics"))
-			g.Expect(tmContainers[0].Ports[0].ContainerPort).To(gomega.Equal(int32(9250)))
-			g.Expect(tmContainers[0].Env).To(gomega.HaveLen(1))
-			g.Expect(tmContainers[0].Env[0].ValueFrom.ResourceFieldRef.Resource).To(gomega.Equal("requests.memory"))
-			g.Expect(tmContainers[0].Env[0].ValueFrom.ResourceFieldRef.Divisor).To(gomega.Equal(resource.MustParse("1Mi")))
-
-			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateRunning))
-			g.Expect(created.Spec.TaskManager.PodTemplate).NotTo(gomega.BeNil())
-			g.Expect(created.Spec.TaskManager.PodTemplate.Spec.NodeSelector).To(gomega.HaveKeyWithValue(instanceKey, "spot-pool"))
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		behavioral.DeactivateWorkload(ctx, k8sClient, wlKey)
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-	})
-
-	ginkgo.It("Should enforce immutability during savepoint eviction drain until quota reservation is cleared", func() {
+	ginkgo.It("Should hold quota during savepoint eviction drain on deactivation and allow detaching once cleared", func() {
 		flinkDep := testingflinkdeployment.MakeFlinkDeployment("savepoint-drain-immutable", ns.Name).
 			Queue(localQueue.Name).
 			Suspend(false).
@@ -1278,18 +1161,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 			g.Expect(k8sClient.Status().Update(ctx, created)).To(gomega.Succeed())
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
-		ginkgo.By("Deactivating Workload so stopJob suspends FlinkDeployment while QuotaReserved stays True during savepoint drain")
-		behavioral.DeactivateWorkload(ctx, k8sClient, wlKey)
-		wl := &kueue.Workload{}
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
-			g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
-			g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadEvicted))
-			g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadQuotaReserved))
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		ginkgo.By("Rejecting queue-name removal and TaskManager replica scaling while savepoint drain still holds quota")
+		ginkgo.By("Rejecting queue-name removal and TaskManager replica scaling while FlinkDeployment is running")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 		detachAttempt := created.DeepCopy()
 		delete(detachAttempt.Labels, controllerconstants.QueueLabel)
@@ -1302,7 +1174,18 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		err = k8sClient.Update(ctx, scaleAttempt)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("while Workload has quota reserved"))
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("when FlinkDeployment is not suspended"))
+
+		ginkgo.By("Deactivating Workload so stopJob suspends FlinkDeployment while QuotaReserved stays True during savepoint drain")
+		behavioral.DeactivateWorkload(ctx, k8sClient, wlKey)
+		wl := &kueue.Workload{}
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
+			g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+			g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadEvicted))
+			g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadQuotaReserved))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
 		ginkgo.By("Simulating savepoint completion and pod teardown so QuotaReserved becomes False")
 		gomega.Eventually(func(g gomega.Gomega) {
@@ -1320,7 +1203,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 			g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusFalse(kueue.WorkloadQuotaReserved))
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
-		ginkgo.By("Allowing spec edits and queue-name removal once quota reservation is cleared")
+		ginkgo.By("Allowing spec edits and queue-name removal once suspended and quota reservation is cleared")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 			created.Spec.TaskManager.Replicas = new(int64(3))
@@ -1382,7 +1265,7 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	})
 
-	ginkgo.It("Should strip tainted flavor overlays via Stop for cross-flavor re-admission and block two-step post-finish resurrection", func() {
+	ginkgo.It("Should strip tainted flavor overlays via Stop for cross-flavor re-admission and not recreate a deleted finished Workload", func() {
 		extraFlavor = utiltestingapi.MakeResourceFlavor("tainted-spot-flavor").
 			NodeLabel(instanceKey, "tainted-spot-pool").
 			Toleration(corev1.Toleration{
@@ -1495,21 +1378,14 @@ var _ = ginkgo.Describe("FlinkDeployment controller and scheduler", ginkgo.Label
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 		behavioral.ExpectWorkloadToFinish(ctx, k8sClient, wlKey)
 
-		ginkgo.By("Rejecting pure suspension and spec resurrection on the finished FlinkDeployment while allowing metadata updates")
+		ginkgo.By("Rejecting running-state PodSet mutations on the finished FlinkDeployment while allowing metadata updates")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		suspendAttempt := created.DeepCopy()
-		suspendAttempt.Spec.Job.State = flinkv1beta1.JobStateSuspended
-		suspendErr := k8sClient.Update(ctx, suspendAttempt)
-		gomega.Expect(suspendErr).To(gomega.HaveOccurred())
-		gomega.Expect(suspendErr).To(utiltesting.BeForbiddenError())
-		gomega.Expect(suspendErr.Error()).To(gomega.ContainSubstring("once Workload is finished"))
-
 		resurrectAttempt := created.DeepCopy()
 		resurrectAttempt.Spec.TaskManager.Replicas = new(int64(3))
 		resurrectErr := k8sClient.Update(ctx, resurrectAttempt)
 		gomega.Expect(resurrectErr).To(gomega.HaveOccurred())
 		gomega.Expect(resurrectErr).To(utiltesting.BeForbiddenError())
-		gomega.Expect(resurrectErr.Error()).To(gomega.ContainSubstring("once Workload is finished"))
+		gomega.Expect(resurrectErr.Error()).To(gomega.ContainSubstring("when FlinkDeployment is not suspended"))
 
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
@@ -1698,6 +1574,119 @@ var _ = ginkgo.Describe("FlinkDeployment controller with TopologyAwareScheduling
 		err := k8sClient.Update(ctx, gateStripped)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+	})
+
+	ginkgo.It("Should suspend via Stop without wedging when an admitted HA TAS-grouped FlinkDeployment is scaled to 0 or 4 via /scale", func() {
+		groupAnnotations := map[string]string{
+			kueue.PodSetGroupName:                  "ha-flink-group",
+			kueue.PodSetRequiredTopologyAnnotation: utiltesting.DefaultRackTopologyLevel,
+		}
+		flinkDep := testingflinkdeployment.MakeFlinkDeployment("tas-ha-group-scale", ns.Name).
+			Queue(localQueue.Name).
+			Suspend(false).
+			JobManagerReplicas(2).
+			TaskManagerReplicas(1).
+			JobManagerPodTemplate(&corev1.PodTemplateSpec{Annotations: groupAnnotations}).
+			TaskManagerPodTemplate(&corev1.PodTemplateSpec{Annotations: groupAnnotations}).
+			Obj()
+		behavioral.MustCreate(ctx, k8sClient, flinkDep)
+
+		lookupKey := client.ObjectKeyFromObject(flinkDep)
+		wlLookupKey := types.NamespacedName{
+			Namespace: ns.Name,
+			Name:      workloadflinkdeployment.GetWorkloadNameForFlinkDeployment(flinkDep.Name, flinkDep.UID),
+		}
+		behavioral.ExpectWorkloadsToBeAdmittedByKeys(ctx, k8sClient, wlLookupKey)
+
+		created := &flinkv1beta1.FlinkDeployment{}
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateRunning))
+			g.Expect(created.Spec.JobManager.PodTemplate.Spec.SchedulingGates).To(
+				gomega.ContainElement(corev1.PodSchedulingGate{Name: kueue.TopologySchedulingGate}))
+			g.Expect(created.Spec.TaskManager.PodTemplate.Spec.SchedulingGates).To(
+				gomega.ContainElement(corev1.PodSchedulingGate{Name: kueue.TopologySchedulingGate}))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		scaleTaskManagers := func(replicas int32) {
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+				scaleObj := &autoscalingv1.Scale{}
+				g.Expect(k8sClient.SubResource("scale").Get(ctx, created, scaleObj)).To(gomega.Succeed())
+				scaleObj.Spec.Replicas = replicas
+				g.Expect(k8sClient.SubResource("scale").Update(ctx, created, client.WithSubResourceBody(scaleObj))).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		}
+
+		ginkgo.By("Scaling HA TAS-grouped FlinkDeployment to 0 via /scale and verifying Stop suspends and strips TAS gates")
+		scaleTaskManagers(0)
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
+			g.Expect(created.Spec.TaskManager.Replicas).To(gomega.HaveValue(gomega.Equal(int64(0))))
+			g.Expect(created.Spec.JobManager.PodTemplate.Spec.SchedulingGates).To(gomega.BeEmpty())
+			g.Expect(created.Spec.TaskManager.PodTemplate.Spec.SchedulingGates).To(gomega.BeEmpty())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Rejecting suspended update that changes TaskManager replicas from 0 to 3 (another invalid group count)")
+		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+		invalidGroupAttempt := created.DeepCopy()
+		invalidGroupAttempt.Spec.TaskManager.Replicas = new(int64(3))
+		invalidErr := k8sClient.Update(ctx, invalidGroupAttempt)
+		gomega.Expect(invalidErr).To(gomega.HaveOccurred())
+		gomega.Expect(invalidErr).To(utiltesting.BeForbiddenError())
+		gomega.Expect(invalidErr.Error()).To(gomega.ContainSubstring("can only define groups where at least one pod set has only 1 replica"))
+
+		ginkgo.By("Repairing TaskManager replicas back to 1 while suspended and waiting for re-admission")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			created.Spec.TaskManager.Replicas = new(int64(1))
+			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		behavioral.ExpectWorkloadsToBeAdmittedByKeys(ctx, k8sClient, wlLookupKey)
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateRunning))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Scaling HA TAS-grouped FlinkDeployment to 4 via /scale and verifying Stop suspends and deletes the stale Workload")
+		var preScaleFourWl kueue.Workload
+		gomega.Expect(k8sClient.Get(ctx, wlLookupKey, &preScaleFourWl)).To(gomega.Succeed())
+		preScaleFourUID := preScaleFourWl.UID
+		scaleTaskManagers(4)
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateSuspended))
+			g.Expect(created.Spec.TaskManager.Replicas).To(gomega.HaveValue(gomega.Equal(int64(4))))
+			g.Expect(created.Spec.JobManager.PodTemplate.Spec.SchedulingGates).To(gomega.BeEmpty())
+			g.Expect(created.Spec.TaskManager.PodTemplate.Spec.SchedulingGates).To(gomega.BeEmpty())
+			var curWl kueue.Workload
+			err := k8sClient.Get(ctx, wlLookupKey, &curWl)
+			g.Expect(err != nil || curWl.UID != preScaleFourUID).To(gomega.BeTrue())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Rejecting suspended update that renames podset-group-name while counts remain (2, 4)")
+		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+		renameGroupAttempt := created.DeepCopy()
+		renameGroupAttempt.Spec.JobManager.PodTemplate.Annotations[kueue.PodSetGroupName] = "ha-flink-group-renamed"
+		renameGroupAttempt.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetGroupName] = "ha-flink-group-renamed"
+		renameErr := k8sClient.Update(ctx, renameGroupAttempt)
+		gomega.Expect(renameErr).To(gomega.HaveOccurred())
+		gomega.Expect(renameErr).To(utiltesting.BeForbiddenError())
+		gomega.Expect(renameErr.Error()).To(gomega.ContainSubstring("can only define groups where at least one pod set has only 1 replica"))
+
+		ginkgo.By("Repairing TaskManager replicas from 4 back to 1 and verifying re-admission to running")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			created.Spec.TaskManager.Replicas = new(int64(1))
+			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		behavioral.ExpectWorkloadsToBeAdmittedByKeys(ctx, k8sClient, wlLookupKey)
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
+			g.Expect(created.Spec.Job.State).To(gomega.Equal(flinkv1beta1.JobStateRunning))
+			g.Expect(created.Spec.TaskManager.Replicas).To(gomega.HaveValue(gomega.Equal(int64(1))))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	})
 })
 

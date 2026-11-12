@@ -28,6 +28,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -654,7 +656,7 @@ func TestPodSets(t *testing.T) {
 			job: testingflinkdeployment.MakeFlinkDeployment("bad-replicas", "ns").
 				JobManagerReplicas(0).
 				Obj(),
-			wantErrSubstr: "jobManager.replicas must be greater than or equal to 1",
+			wantErrSubstr: "jobManager.replicas must be between 1 and 2147483647, got 0",
 		},
 		"component resources requests replace inherited podTemplate limits and backfill limits from requests": {
 			job: testingflinkdeployment.MakeFlinkDeployment("cross-layer-req-gt-lim", "ns").
@@ -812,30 +814,40 @@ func TestPodSets(t *testing.T) {
 					},
 				}).
 				Obj(),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"fractional BinarySI memory literal in component resources returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("fractional-resources", "ns").
 				TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1.5Gi"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1.5Gi"),
 					},
 				}).
 				Obj(),
 			wantErrSubstr: "must not contain a decimal point",
 		},
-		"plain integer byte literals and Pi BinarySI in component resources succeed": {
-			job: testingflinkdeployment.MakeFlinkDeployment("plain-bytes-and-pi", "ns").
+		"plain integer byte literal in component resources returns error": {
+			job: testingflinkdeployment.MakeFlinkDeployment("plain-bytes-resources", "ns").
 				JobManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceCPU:    flinkv1beta1.MustParseQuantity("1"),
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1000000000"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1000000000"),
+					},
+				}).
+				Obj(),
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
+		},
+		"BinarySI Mi and Pi in component resources succeed": {
+			job: testingflinkdeployment.MakeFlinkDeployment("binarysi-mi-and-pi", "ns").
+				JobManagerRawResources(flinkv1beta1.ResourceRequirements{
+					Requests: flinkv1beta1.ResourceList{
+						corev1.ResourceCPU:    testingflinkdeployment.MustParseQuantity("1"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1024Mi"),
 					},
 				}).
 				TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceCPU:    flinkv1beta1.MustParseQuantity("2"),
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1Pi"),
+						corev1.ResourceCPU:    testingflinkdeployment.MustParseQuantity("2"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1Pi"),
 					},
 				}).
 				Obj(),
@@ -852,11 +864,11 @@ func TestPodSets(t *testing.T) {
 									Resources: corev1.ResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceCPU:    resource.MustParse("1"),
-											corev1.ResourceMemory: *resource.NewQuantity(1000000000, resource.DecimalSI),
+											corev1.ResourceMemory: resource.MustParse("1024Mi"),
 										},
 										Limits: corev1.ResourceList{
 											corev1.ResourceCPU:    resource.MustParse("1"),
-											corev1.ResourceMemory: *resource.NewQuantity(1000000000, resource.DecimalSI),
+											corev1.ResourceMemory: resource.MustParse("1024Mi"),
 										},
 									},
 								},
@@ -935,7 +947,7 @@ func TestPodSets(t *testing.T) {
 				Obj(),
 			wantErrSubstr: "overhead resource memory (-1Gi) must be non-negative",
 		},
-		"corrupted Exists toleration from positional merge returns error": {
+		"non-prefix role toleration from positional merge returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("corrupted-tol", "ns").
 				PodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -952,7 +964,7 @@ func TestPodSets(t *testing.T) {
 					},
 				}).
 				Obj(),
-			wantErrSubstr: "value must be empty when operator is Exists",
+			wantErrSubstr: "must include spec.podTemplate.spec.tolerations as a prefix",
 		},
 		"omitted job.parallelism without taskManager.replicas returns error": {
 			job: func() *flinkv1beta1.FlinkDeployment {
@@ -981,7 +993,7 @@ func TestPodSets(t *testing.T) {
 					},
 				}).
 				Obj(),
-			wantErrSubstr: "must be at least 1 byte",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"top-level spec.image, spec.imagePullPolicy, and spec.serviceAccount overwrite podTemplate values": {
 			job: testingflinkdeployment.MakeFlinkDeployment("image-and-sa-precedence", "ns").
@@ -1257,57 +1269,47 @@ func TestPodSets(t *testing.T) {
 			},
 		},
 		"merge-arrays-by-name falls back to positional merge when container override omits name and avoids phantom container": {
-			job: testingflinkdeployment.MakeFlinkDeployment("unnamed-container-override", "ns").
-				FlinkConfig(flinkConfigPodTemplateMergeArraysByName, "true").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{
-							"node-role.kubernetes.io/worker": "",
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name:     "scratch",
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
+			job: func() *flinkv1beta1.FlinkDeployment {
+				fd := testingflinkdeployment.MakeFlinkDeployment("unnamed-container-override", "ns").
+					FlinkConfig(flinkConfigPodTemplateMergeArraysByName, "true").
+					PodTemplate(&corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							NodeSelector: map[string]string{
+								"node-role.kubernetes.io/worker": "",
 							},
-						},
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Ports: []corev1.ContainerPort{
-									{Name: "metrics", ContainerPort: 9249},
-								},
-								Resources: corev1.ResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
-									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
-									},
+							Volumes: []corev1.Volume{
+								{
+									Name:     "scratch",
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
 								},
 							},
-						},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 9250},
-								},
-								Resources: corev1.ResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4"),
+							Containers: []corev1.Container{
+								{
+									Name: flinkMainContainerName,
+									Ports: []corev1.ContainerPort{
+										{Name: "metrics", ContainerPort: 9249},
 									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4"),
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+										},
 									},
 								},
 							},
 						},
-					},
-				}).
-				Obj(),
+					}).
+					Obj()
+				if err := json.Unmarshal(
+					[]byte(`{"spec":{"containers":[{"ports":[{"containerPort":9250}],"resources":{"requests":{"nvidia.com/gpu":"4"},"limits":{"nvidia.com/gpu":"4"}}}]}}`),
+					&fd.Spec.TaskManager.PodTemplate,
+				); err != nil {
+					t.Fatalf("json.Unmarshal(tm podTemplate) error: %v", err)
+				}
+				return fd
+			}(),
 			wantPodSets: []kueue.PodSet{
 				{
 					Name:  jobManagerPodSetName,
@@ -1401,15 +1403,15 @@ func TestPodSets(t *testing.T) {
 		},
 		"empty string merge-arrays-by-name returns error": {
 			job:           jobWithRawFlinkConfig(`{"kubernetes.operator.pod-template.merge-arrays-by-name": ""}`),
-			wantErrSubstr: `invalid kubernetes.operator.pod-template.merge-arrays-by-name ""`,
+			wantErrSubstr: `invalid boolean value ""`,
 		},
 		"whitespace merge-arrays-by-name returns error": {
 			job:           jobWithRawFlinkConfig(`{"kubernetes.operator.pod-template.merge-arrays-by-name": " false "}`),
-			wantErrSubstr: `invalid kubernetes.operator.pod-template.merge-arrays-by-name " false "`,
+			wantErrSubstr: `invalid boolean value " false "`,
 		},
 		"null merge-arrays-by-name returns error": {
 			job:           jobWithRawFlinkConfig(`{"kubernetes.operator.pod-template.merge-arrays-by-name": null}`),
-			wantErrSubstr: `invalid kubernetes.operator.pod-template.merge-arrays-by-name "null"`,
+			wantErrSubstr: `invalid boolean value "null"`,
 		},
 		"whitespace-padded ephemeralStorage in component resource returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("ws-ephemeral", "ns").
@@ -1496,25 +1498,25 @@ func TestPodSets(t *testing.T) {
 			job: testingflinkdeployment.MakeFlinkDeployment("neg-replicas", "ns").
 				TaskManagerReplicas(-1).
 				Obj(),
-			wantErrSubstr: "taskManager.replicas must be greater than or equal to 0, got -1",
+			wantErrSubstr: "taskManager.replicas must be between 0 and 2147483647, got -1",
 		},
 		"jobManager.replicas above math.MaxInt32 returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("jm-replicas-overflow", "ns").
 				JobManagerReplicas(int64(math.MaxInt32) + 1).
 				Obj(),
-			wantErrSubstr: "jobManager.replicas must be less than or equal to 2147483647, got 2147483648",
+			wantErrSubstr: "jobManager.replicas must be between 1 and 2147483647, got 2147483648",
 		},
 		"taskManager.replicas above math.MaxInt32 returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("tm-replicas-overflow", "ns").
 				TaskManagerReplicas(int64(math.MaxInt32) + 1).
 				Obj(),
-			wantErrSubstr: "taskManager.replicas must be less than or equal to 2147483647, got 2147483648",
+			wantErrSubstr: "taskManager.replicas must be between 0 and 2147483647, got 2147483648",
 		},
 		"job.parallelism above math.MaxInt32 returns error": {
 			job: testingflinkdeployment.MakeFlinkDeployment("parallelism-overflow", "ns").
 				Parallelism(int64(math.MaxInt32) + 1).
 				Obj(),
-			wantErrSubstr: "job.parallelism must be less than or equal to 2147483647, got 2147483648",
+			wantErrSubstr: "job.parallelism must be between 1 and 2147483647, got 2147483648",
 		},
 		"deferred base podTemplate decode error (Flink 2g memory in container) returns error": {
 			job: func() *flinkv1beta1.FlinkDeployment {
@@ -1546,57 +1548,66 @@ func TestPodSets(t *testing.T) {
 			job:           jobWithRawFlinkConfig(`["not", "a", "map"]`),
 			wantErrSubstr: "cannot unmarshal array into Go value of type map[string]",
 		},
-		"Go-constructed role podTemplate preserves empty HTTPHeader.Value and Sysctl.Value overrides": {
-			job: testingflinkdeployment.MakeFlinkDeployment("empty-header-sysctl", "ns").
-				ServiceAccount("flink").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						SecurityContext: &corev1.PodSecurityContext{
-							Sysctls: []corev1.Sysctl{
-								{Name: "kernel.shm_rmid_forced", Value: "1"},
-								{Name: "net.core.somaxconn", Value: "1024"},
-							},
-						},
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								LivenessProbe: &corev1.Probe{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt32(8081),
-										HTTPHeaders: []corev1.HTTPHeader{
-											{Name: "X-Custom", Value: "from-base"},
-											{Name: "X-Keep", Value: "inherited"},
-										},
-									},
-								},
-							},
-						},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						SecurityContext: &corev1.PodSecurityContext{
-							Sysctls: []corev1.Sysctl{
-								{Name: "kernel.shm_rmid_forced", Value: ""},
-								{},
-							},
-						},
-						Containers: []corev1.Container{
-							{
-								LivenessProbe: &corev1.Probe{
-									HTTPGet: &corev1.HTTPGetAction{
-										HTTPHeaders: []corev1.HTTPHeader{
-											{Name: "X-Custom", Value: ""},
-											{},
-										},
-									},
-								},
-							},
-						},
-					},
-				}).
+		"omitted jobManager memory returns error instead of 0-memory PodSet": {
+			job: testingflinkdeployment.MakeFlinkDeployment("no-jm-mem", "ns").
+				JobManagerResource(new(1.0), "", "").
 				Obj(),
+			wantErrSubstr: "spec.job and explicit jobManager and taskManager memory are required",
+		},
+		"omitted taskManager memory returns error instead of 0-memory PodSet": {
+			job: testingflinkdeployment.MakeFlinkDeployment("no-tm-mem", "ns").
+				TaskManagerResource(new(1.0), "", "").
+				Obj(),
+			wantErrSubstr: "spec.job and explicit jobManager and taskManager memory are required",
+		},
+		"forbidden flinkConfiguration memory sizing key returns error": {
+			job:           jobWithRawFlinkConfig(`{"taskmanager.memory.process.size": "4096m"}`),
+			wantErrSubstr: "configure component resources and replicas in spec.jobManager and spec.taskManager instead of spec.flinkConfiguration",
+		},
+		"forbidden flinkConfiguration autoscaler key returns error": {
+			job:           jobWithRawFlinkConfig(`{"job.autoscaler.enabled": "true"}`),
+			wantErrSubstr: "dynamic Flink autoscaling is not supported",
+		},
+		"partial JSON role podTemplate preserves empty HTTPHeader.Value and Sysctl.Value overrides": {
+			job: func() *flinkv1beta1.FlinkDeployment {
+				fd := testingflinkdeployment.MakeFlinkDeployment("empty-header-sysctl", "ns").
+					ServiceAccount("flink").
+					PodTemplate(&corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							SecurityContext: &corev1.PodSecurityContext{
+								Sysctls: []corev1.Sysctl{
+									{Name: "kernel.shm_rmid_forced", Value: "1"},
+									{Name: "net.core.somaxconn", Value: "1024"},
+								},
+							},
+							Containers: []corev1.Container{
+								{
+									Name: flinkMainContainerName,
+									LivenessProbe: &corev1.Probe{
+										HTTPGet: &corev1.HTTPGetAction{
+											Path: "/healthz",
+											Port: intstr.FromInt32(8081),
+											HTTPHeaders: []corev1.HTTPHeader{
+												{Name: "X-Custom", Value: "from-base"},
+												{Name: "X-Keep", Value: "inherited"},
+											},
+										},
+									},
+								},
+							},
+						},
+					}).
+					Obj()
+				if err := json.Unmarshal(
+					[]byte(
+						`{"spec":{"securityContext":{"sysctls":[{"name":"kernel.shm_rmid_forced","value":""},{}]},"containers":[{"livenessProbe":{"httpGet":{"httpHeaders":[{"name":"X-Custom","value":""},{}]}}}]}}`,
+					),
+					&fd.Spec.TaskManager.PodTemplate,
+				); err != nil {
+					t.Fatalf("json.Unmarshal(tm podTemplate) error: %v", err)
+				}
+				return fd
+			}(),
 			wantPodSets: []kueue.PodSet{
 				{
 					Name:  jobManagerPodSetName,
@@ -1937,28 +1948,7 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 				}).
 				Obj(),
 		},
-		"shorter non-empty role slices (0 < len(role) < len(base)) with Equal base toleration and Exists flavor toleration round-trip without corruption": {
-			initial: testingflinkdeployment.MakeFlinkDeployment("flink-partial-override-positional", "ns").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations:     []corev1.Toleration{rootTol, rootSecondEqualTol},
-						SchedulingGates: []corev1.PodSchedulingGate{rootGate, rootSecondGate},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations:     []corev1.Toleration{roleTol},
-						SchedulingGates: []corev1.PodSchedulingGate{roleGate},
-					},
-				}).
-				Obj(),
-			wantRunningTMGs: []corev1.PodSchedulingGate{
-				roleGate,
-				rootSecondGate,
-				{Name: kueue.TopologySchedulingGate},
-			},
-		},
-		"shorter non-empty role slices with merge-arrays-by-name=true do not clone base schedulingGates into role podTemplate": {
+		"non-prefix role schedulingGates with merge-arrays-by-name=true do not clone base schedulingGates into role podTemplate": {
 			initial: testingflinkdeployment.MakeFlinkDeployment("flink-partial-override-by-name", "ns").
 				FlinkConfig("kubernetes.operator.pod-template.merge-arrays-by-name", "true").
 				PodTemplate(&corev1.PodTemplateSpec{
@@ -1969,7 +1959,7 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 				}).
 				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Tolerations:     []corev1.Toleration{roleTol},
+						Tolerations:     []corev1.Toleration{rootTol, rootSecondEqualTol, roleTol},
 						SchedulingGates: []corev1.PodSchedulingGate{roleGate},
 					},
 				}).
@@ -2052,133 +2042,81 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 				return fd
 			}(),
 		},
-		"partial positional role toleration overrides ({key: role} and {key: role, effect: NoSchedule}) round-trip without expanding to hybrid base tolerations": {
-			initial: testingflinkdeployment.MakeFlinkDeployment("flink-partial-tol-override", "ns").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{rootTol},
-					},
-				}).
-				JobManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{{Key: "role"}},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{{Key: "role", Effect: corev1.TaintEffectNoSchedule}},
-					},
-				}).
-				Obj(),
-		},
-		"shorter partial positional role toleration override (0 < len(role) < len(base)) round-trips without expanding index 0": {
-			initial: testingflinkdeployment.MakeFlinkDeployment("flink-shorter-partial-tol-override", "ns").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{rootTol, rootSecondEqualTol},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{{Key: "role"}},
-					},
-				}).
-				Obj(),
-		},
 		"preserves explicit empty pointer strings, IntOrString(\"\"), and inherited ResourceFieldSelector.Divisor across admission and restore": {
-			initial: testingflinkdeployment.MakeFlinkDeployment("flink-empty-ptrs-and-divisor", "ns").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						DNSConfig: &corev1.PodDNSConfig{
-							Options: []corev1.PodDNSConfigOption{
-								{Name: "ndots", Value: new("")},
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: "local-dir",
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/tmp/flink",
-									Type: new(corev1.HostPathUnset),
+			initial: func() *flinkv1beta1.FlinkDeployment {
+				fd := testingflinkdeployment.MakeFlinkDeployment("flink-empty-ptrs-and-divisor", "ns").
+					PodTemplate(&corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							DNSConfig: &corev1.PodDNSConfig{
+								Options: []corev1.PodDNSConfigOption{
+									{Name: "ndots", Value: new("")},
 								},
 							},
-							{
-								Name: "ephemeral-vol",
-								Ephemeral: &corev1.EphemeralVolumeSource{
-									VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
-										Spec: corev1.PersistentVolumeClaimSpec{
-											StorageClassName: new("fast-ssd"),
-											DataSource: &corev1.TypedLocalObjectReference{
-												APIGroup: new(""),
-												Kind:     "PersistentVolumeClaim",
-												Name:     "seed-pvc",
+							Volumes: []corev1.Volume{
+								{
+									Name: "local-dir",
+									HostPath: &corev1.HostPathVolumeSource{
+										Path: "/tmp/flink",
+										Type: new(corev1.HostPathUnset),
+									},
+								},
+								{
+									Name: "ephemeral-vol",
+									Ephemeral: &corev1.EphemeralVolumeSource{
+										VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
+											Spec: corev1.PersistentVolumeClaimSpec{
+												StorageClassName: new("fast-ssd"),
+												DataSource: &corev1.TypedLocalObjectReference{
+													APIGroup: new(""),
+													Kind:     "PersistentVolumeClaim",
+													Name:     "seed-pvc",
+												},
 											},
 										},
 									},
 								},
 							},
-						},
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Env: []corev1.EnvVar{
-									{
-										Name: "POD_MEM",
-										ValueFrom: &corev1.EnvVarSource{
-											ResourceFieldRef: &corev1.ResourceFieldSelector{
-												Resource: "limits.memory",
-												Divisor:  resource.MustParse("1Mi"),
+							Containers: []corev1.Container{
+								{
+									Name: flinkMainContainerName,
+									Env: []corev1.EnvVar{
+										{
+											Name: "POD_MEM",
+											ValueFrom: &corev1.EnvVarSource{
+												ResourceFieldRef: &corev1.ResourceFieldSelector{
+													Resource: "limits.memory",
+													Divisor:  resource.MustParse("1Mi"),
+												},
 											},
 										},
 									},
-								},
-								LivenessProbe: &corev1.Probe{
-									GRPC: &corev1.GRPCAction{
-										Port:    9090,
-										Service: new(""),
+									LivenessProbe: &corev1.Probe{
+										GRPC: &corev1.GRPCAction{
+											Port:    9090,
+											Service: new(""),
+										},
 									},
-								},
-								ReadinessProbe: &corev1.Probe{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/readyz",
-										Port: intstr.FromString(""),
-									},
-								},
-							},
-						},
-					},
-				}).
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "local-dir"},
-							{
-								Name: "ephemeral-vol",
-								Ephemeral: &corev1.EphemeralVolumeSource{
-									VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
-										Spec: corev1.PersistentVolumeClaimSpec{
-											StorageClassName: new(""),
+									ReadinessProbe: &corev1.Probe{
+										HTTPGet: &corev1.HTTPGetAction{
+											Path: "/readyz",
+											Port: intstr.FromString(""),
 										},
 									},
 								},
 							},
 						},
-						Containers: []corev1.Container{
-							{
-								Env: []corev1.EnvVar{
-									{
-										ValueFrom: &corev1.EnvVarSource{
-											ResourceFieldRef: &corev1.ResourceFieldSelector{
-												Resource: "requests.memory",
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				}).
-				Obj(),
+					}).
+					Obj()
+				if err := json.Unmarshal(
+					[]byte(
+						`{"spec":{"volumes":[{"name":"local-dir"},{"name":"ephemeral-vol","ephemeral":{"volumeClaimTemplate":{"spec":{"storageClassName":""}}}}],"containers":[{"env":[{"valueFrom":{"resourceFieldRef":{"resource":"requests.memory"}}}]}]}}`,
+					),
+					&fd.Spec.TaskManager.PodTemplate,
+				); err != nil {
+					t.Fatalf("json.Unmarshal(tm podTemplate) error: %v", err)
+				}
+				return fd
+			}(),
 		},
 		"raw-JSON zero-value component PodSpec override (hostNetwork: false overriding root hostNetwork: true) survives eviction": {
 			initial: func() *flinkv1beta1.FlinkDeployment {
@@ -2245,12 +2183,12 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 				fd.Spec.TaskManager.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{roleGate}
 			},
 		},
-		"taintless non-TAS admission preserves explicit user role tolerations and positional schedulingGates matching spec.podTemplate": {
+		"taintless non-TAS admission preserves explicit user role tolerations and positional schedulingGates matching or extending spec.podTemplate": {
 			initial: testingflinkdeployment.MakeFlinkDeployment("flink-taintless-non-tas-matching-role", "ns").
 				PodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Tolerations:     []corev1.Toleration{rootTol, rootSecondEqualTol},
-						SchedulingGates: []corev1.PodSchedulingGate{rootGate, rootSecondGate},
+						Tolerations:     []corev1.Toleration{rootTol},
+						SchedulingGates: []corev1.PodSchedulingGate{rootGate},
 					},
 				}).
 				JobManagerPodTemplate(&corev1.PodTemplateSpec{
@@ -2319,6 +2257,49 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 			editWhileQueued: func(fd *flinkv1beta1.FlinkDeployment) {
 				fd.Spec.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{rootSecondGate}
 			},
+		},
+		"queued positional schedulingGates prefix edit ([g1] + [g1, gRole] -> [g2] + [g2, gRole]) preserves updated prefix across TAS admission and restore": {
+			initial: testingflinkdeployment.MakeFlinkDeployment("flink-queued-prefix-gate-tas", "ns").
+				PodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{rootGate},
+					},
+				}).
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{rootGate, roleGate},
+					},
+				}).
+				Obj(),
+			editWhileQueued: func(fd *flinkv1beta1.FlinkDeployment) {
+				fd.Spec.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{rootSecondGate}
+				fd.Spec.TaskManager.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{rootSecondGate, roleGate}
+			},
+			wantRunningTMGs: []corev1.PodSchedulingGate{
+				rootSecondGate,
+				roleGate,
+				{Name: kueue.TopologySchedulingGate},
+			},
+		},
+		"queued positional schedulingGates prefix edit ([g1] + [g1, gRole] -> [g2] + [g2, gRole]) preserves updated prefix across non-TAS admission and restore": {
+			initial: testingflinkdeployment.MakeFlinkDeployment("flink-queued-prefix-gate-non-tas", "ns").
+				PodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{rootGate},
+					},
+				}).
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{rootGate, roleGate},
+					},
+				}).
+				Obj(),
+			editWhileQueued: func(fd *flinkv1beta1.FlinkDeployment) {
+				fd.Spec.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{rootSecondGate}
+				fd.Spec.TaskManager.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{rootSecondGate, roleGate}
+			},
+			customAssignInfo: taintlessNonTASAssignInfo,
+			wantRunningTMGs:  []corev1.PodSchedulingGate{rootSecondGate, roleGate},
 		},
 	}
 
@@ -2426,8 +2407,8 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 			if diff := cmp.Diff(targetInitial, job.Object()); diff != "" {
 				t.Errorf("restored FlinkDeployment object mismatch (-want,+got):\n%s", diff)
 			}
-			if !specsEqualWithRawFidelity(targetInitial.Spec, job.Spec) {
-				t.Error("restored FlinkDeployment.Spec lost raw JSON fidelity")
+			if !apiequality.Semantic.DeepEqual(targetInitial.Spec, job.Spec) {
+				t.Error("restored FlinkDeployment.Spec lost semantic equality")
 			}
 
 			// Verify identical PodSet and spec round-trip across kube-apiserver JSON serialization.
@@ -2506,8 +2487,8 @@ func TestRunAndRestorePodSetsInfoRoundTrip(t *testing.T) {
 			if diff := cmp.Diff(&wireInitial, &wireRestored); diff != "" {
 				t.Errorf("wireRestored FlinkDeployment mismatch (-want,+got):\n%s", diff)
 			}
-			if !specsEqualWithRawFidelity(wireInitial.Spec, wireRestored.Spec) {
-				t.Errorf("wireRestored FlinkDeployment.Spec lost raw JSON fidelity:\ninit: %s\nrestored: %s",
+			if !apiequality.Semantic.DeepEqual(wireInitial.Spec, wireRestored.Spec) {
+				t.Errorf("wireRestored FlinkDeployment.Spec lost semantic equality:\ninit: %s\nrestored: %s",
 					string(wireInitBytes), string(wireRestoredBytes))
 			}
 		})
@@ -2571,8 +2552,8 @@ func TestRestorePodSetsInfoStripsFlavorTolerationsWhenShrunkWhileQueued(t *testi
 			},
 			wantRestoredTMs: []corev1.Toleration{user1Tol, user2Tol, user3Tol},
 		},
-		"partial positional role toleration override shrunk while queued preserves un-merged partial override and strips flavor taint": {
-			initial: testingflinkdeployment.MakeFlinkDeployment("shrunk-partial-role-tols", "ns").
+		"prefixed role tolerations shrunk while queued preserve prefix and strip flavor taint": {
+			initial: testingflinkdeployment.MakeFlinkDeployment("shrunk-prefixed-role-tols", "ns").
 				PodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Tolerations: []corev1.Toleration{rootTol},
@@ -2580,14 +2561,14 @@ func TestRestorePodSetsInfoStripsFlavorTolerationsWhenShrunkWhileQueued(t *testi
 				}).
 				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Tolerations: []corev1.Toleration{{Key: "role-override"}, user2Tol, user3Tol},
+						Tolerations: []corev1.Toleration{rootTol, user2Tol, user3Tol},
 					},
 				}).
 				Obj(),
 			shrinkQueued: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.TaskManager.PodTemplate.Spec.Tolerations = []corev1.Toleration{{Key: "role-override"}}
+				fd.Spec.TaskManager.PodTemplate.Spec.Tolerations = []corev1.Toleration{rootTol}
 			},
-			wantRestoredTMs: []corev1.Toleration{{Key: "role-override"}, user2Tol, user3Tol},
+			wantRestoredTMs: []corev1.Toleration{rootTol, user2Tol, user3Tol},
 		},
 	}
 
@@ -2947,6 +2928,7 @@ func TestStop(t *testing.T) {
 	testCases := map[string]struct {
 		initial        *flinkv1beta1.FlinkDeployment
 		podSetsInfo    []podset.PodSetInfo
+		patchErr       error
 		wantStoppedNow bool
 		wantPatches    int
 		wantStored     *flinkv1beta1.FlinkDeployment
@@ -2957,6 +2939,14 @@ func TestStop(t *testing.T) {
 			wantStoppedNow: true,
 			wantPatches:    1,
 			wantStored:     preAdmission,
+		},
+		"returns stoppedNow=false when Patch fails on running deployment": {
+			initial:        admittedRunning,
+			podSetsInfo:    restoreInfo,
+			patchErr:       errors.New("simulated patch conflict"),
+			wantStoppedNow: false,
+			wantPatches:    1,
+			wantStored:     admittedRunning,
 		},
 		"restores PodSet overlays on manually suspended deployment without emitting Stopped again": {
 			initial:        manuallySuspendedWithAdmittedOverlays,
@@ -2997,6 +2987,9 @@ func TestStop(t *testing.T) {
 				WithInterceptorFuncs(interceptor.Funcs{
 					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						patches++
+						if tc.patchErr != nil {
+							return tc.patchErr
+						}
 						return c.Patch(ctx, obj, patch, opts...)
 					},
 				}).
@@ -3008,7 +3001,11 @@ func TestStop(t *testing.T) {
 			}
 
 			stoppedNow, err := fromObject(&live).Stop(runCtx, cl, tc.podSetsInfo, jobframework.StopReasonWorkloadEvicted, "evicted")
-			if err != nil {
+			if tc.patchErr != nil {
+				if !errors.Is(err, tc.patchErr) {
+					t.Fatalf("Stop() error = %v, want %v", err, tc.patchErr)
+				}
+			} else if err != nil {
 				t.Fatalf("Stop() unexpected error: %v", err)
 			}
 			if stoppedNow != tc.wantStoppedNow {
@@ -3694,217 +3691,255 @@ func TestRawJSONPartialPodTemplateMergePatchPreservation(t *testing.T) {
 	}
 }
 
-func TestPositionalTolerationEmptyStringOverridesRoundTrip(t *testing.T) {
-	rawInitial := `{
-		"apiVersion": "flink.apache.org/v1beta1",
-		"kind": "FlinkDeployment",
-		"metadata": {
-			"name": "tol-empty-override",
-			"namespace": "ns",
-			"labels": {"kueue.x-k8s.io/queue-name": "lq"}
-		},
-		"spec": {
-			"image": "flink:1.20",
-			"podTemplate": {
-				"spec": {
-					"tolerations": [
-						{"key": "k1", "operator": "Equal", "value": "v1", "effect": "NoSchedule"},
-						{"key": "k2", "operator": "Equal", "value": "v2", "effect": "NoExecute"}
-					]
-				}
-			},
-			"jobManager": {
-				"resource": {"cpu": 1.0, "memory": "1024m"},
-				"podTemplate": {
-					"spec": {
-						"tolerations": [
-							{"operator": "Exists", "value": ""},
-							{"effect": ""}
-						]
+func TestReconcileQueuedPositionalGatesEditAndSuspendedBaseTolerationsRestore(t *testing.T) {
+	t.Run("queued positional schedulingGates prefix edit followed by admission and eviction Stop clears QuotaReserved under ValidateUpdate", func(t *testing.T) {
+		ctx, _ := utiltesting.ContextWithLog(t)
+		g1 := corev1.PodSchedulingGate{Name: "example.com/g1"}
+		g2 := corev1.PodSchedulingGate{Name: "example.com/g2"}
+		gRole := corev1.PodSchedulingGate{Name: "example.com/g-role"}
+
+		flavor := utiltestingapi.MakeResourceFlavor("spot-flavor").NodeLabel("pool", "spot").Obj()
+		initial := testingflinkdeployment.MakeFlinkDeployment("queued-prefix-evict", "ns").
+			UID("uid-queued-prefix-evict").
+			Queue("lq").
+			Suspend(true).
+			PodTemplate(&corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{SchedulingGates: []corev1.PodSchedulingGate{g1}},
+			}).
+			TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{SchedulingGates: []corev1.PodSchedulingGate{g1, gRole}},
+			}).
+			Obj()
+
+		integrationMgr := newTestIntegrationManager(t)
+		var wh *flinkDeploymentWebhook
+		validateWrite := func(ctx context.Context, c client.WithWatch, newFD *flinkv1beta1.FlinkDeployment) error {
+			var oldFD flinkv1beta1.FlinkDeployment
+			if err := c.Get(ctx, client.ObjectKeyFromObject(newFD), &oldFD); err != nil {
+				return err
+			}
+			_, err := wh.ValidateUpdate(ctx, &oldFD, newFD)
+			return err
+		}
+
+		builder := utiltesting.NewClientBuilder(flinkv1beta1.AddToScheme).
+			WithObjects(utiltesting.MakeNamespace("ns"), flavor, initial.DeepCopy()).
+			WithStatusSubresource(&kueue.Workload{}, &flinkv1beta1.FlinkDeployment{}).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if fd, ok := obj.(*flinkv1beta1.FlinkDeployment); ok {
+						if err := validateWrite(ctx, c, fd); err != nil {
+							return err
+						}
 					}
-				}
-			},
-			"taskManager": {
-				"resource": {"cpu": 1.0, "memory": "2048m"},
-				"podTemplate": {
-					"spec": {
-						"tolerations": [
-							{"key": "", "operator": "Exists", "value": ""}
-						]
+					return c.Update(ctx, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if fd, ok := obj.(*flinkv1beta1.FlinkDeployment); ok {
+						if err := validateWrite(ctx, c, fd.DeepCopy()); err != nil {
+							return err
+						}
 					}
-				}
-			},
-			"job": {
-				"jarURI": "local:///opt/flink/examples/streaming/StateMachineExample.jar",
-				"parallelism": 2,
-				"state": "suspended"
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+		if err := SetupIndexes(ctx, utiltesting.AsIndexer(builder)); err != nil {
+			t.Fatalf("SetupIndexes() error: %v", err)
+		}
+		cl := builder.Build()
+		wh = &flinkDeploymentWebhook{
+			integrationManager:           integrationMgr,
+			client:                       cl,
+			managedJobsNamespaceSelector: labels.Everything(),
+		}
+
+		reconciler, err := NewReconciler(
+			ctx,
+			cl,
+			nil,
+			events.NewFakeRecorder(20),
+			jobframework.WithIntegrationManager(integrationMgr),
+			jobframework.WithManagedJobsNamespaceSelector(labels.Everything()),
+		)
+		if err != nil {
+			t.Fatalf("NewReconciler() error: %v", err)
+		}
+		req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(initial)}
+
+		// Step 1: initial reconcile creates queued Workload capturing [g1, gRole].
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("initial Reconcile() error: %v", err)
+		}
+		wlKey := client.ObjectKey{Namespace: initial.Namespace, Name: GetWorkloadNameForFlinkDeployment(initial.Name, initial.UID)}
+		var wl kueue.Workload
+		if err := cl.Get(ctx, wlKey, &wl); err != nil {
+			t.Fatalf("cl.Get(Workload) error: %v", err)
+		}
+		wlUID := wl.UID
+
+		// Step 2: update queued CR prefix from [g1] -> [g2] and [g1, gRole] -> [g2, gRole].
+		var live flinkv1beta1.FlinkDeployment
+		if err := cl.Get(ctx, req.NamespacedName, &live); err != nil {
+			t.Fatalf("cl.Get(live) error: %v", err)
+		}
+		live.Spec.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{g2}
+		live.Spec.TaskManager.PodTemplate.Spec.SchedulingGates = []corev1.PodSchedulingGate{g2, gRole}
+		if err := cl.Update(ctx, &live); err != nil {
+			t.Fatalf("queued prefix cl.Update() rejected: %v", err)
+		}
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("post-edit Reconcile() error: %v", err)
+		}
+		if err := cl.Get(ctx, wlKey, &wl); err != nil {
+			t.Fatalf("cl.Get(Workload after edit) error: %v", err)
+		}
+		if wl.UID != wlUID {
+			t.Fatalf("expected EquivalentToWorkload to preserve queued Workload UID %s, got %s", wlUID, wl.UID)
+		}
+
+		// Step 3: admit Workload and reconcile so startJob sets FlinkDeployment running.
+		admission := utiltestingapi.MakeAdmission("cq", jobManagerPodSetName, taskManagerPodSetName).
+			PodSets(
+				utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).Assignment(corev1.ResourceCPU, "spot-flavor", "1").Count(1).Obj(),
+				utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).Assignment(corev1.ResourceCPU, "spot-flavor", "1").Count(1).Obj(),
+			).
+			Obj()
+		now := metav1.Now()
+		wl.Status.Admission = admission
+		apimeta.SetStatusCondition(&wl.Status.Conditions, metav1.Condition{
+			Type:               kueue.WorkloadQuotaReserved,
+			Status:             metav1.ConditionTrue,
+			Reason:             "AdmittedByTest",
+			LastTransitionTime: now,
+		})
+		apimeta.SetStatusCondition(&wl.Status.Conditions, metav1.Condition{
+			Type:               kueue.WorkloadAdmitted,
+			Status:             metav1.ConditionTrue,
+			Reason:             "AdmittedByTest",
+			LastTransitionTime: now,
+		})
+		if err := cl.Status().Update(ctx, &wl); err != nil {
+			t.Fatalf("cl.Status().Update(admit) error: %v", err)
+		}
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("admit Reconcile() error: %v", err)
+		}
+		if err := cl.Get(ctx, req.NamespacedName, &live); err != nil {
+			t.Fatalf("cl.Get(running) error: %v", err)
+		}
+		if live.Spec.Job.State != flinkv1beta1.JobStateRunning {
+			t.Fatalf("expected running state after admission, got %q", live.Spec.Job.State)
+		}
+
+		// Step 4: evict Workload and reconcile; Stop() must pass ValidateUpdate and clear QuotaReserved.
+		if err := cl.Get(ctx, wlKey, &wl); err != nil {
+			t.Fatalf("cl.Get(wl before evict) error: %v", err)
+		}
+		apimeta.SetStatusCondition(&wl.Status.Conditions, metav1.Condition{
+			Type:               kueue.WorkloadEvicted,
+			Status:             metav1.ConditionTrue,
+			Reason:             kueue.WorkloadEvictedByPreemption,
+			Message:            "preempted",
+			LastTransitionTime: now,
+		})
+		if err := cl.Status().Update(ctx, &wl); err != nil {
+			t.Fatalf("cl.Status().Update(evict) error: %v", err)
+		}
+		if _, err := reconciler.Reconcile(ctx, req); err != nil {
+			t.Fatalf("eviction Reconcile() failed (Stop rejected by ValidateUpdate): %v", err)
+		}
+		if err := cl.Get(ctx, req.NamespacedName, &live); err != nil {
+			t.Fatalf("cl.Get(suspended) error: %v", err)
+		}
+		if live.Spec.Job.State != flinkv1beta1.JobStateSuspended {
+			t.Errorf("Spec.Job.State = %q, want suspended", live.Spec.Job.State)
+		}
+		wantRoleGates := []corev1.PodSchedulingGate{g2, gRole}
+		if diff := cmp.Diff(wantRoleGates, live.Spec.TaskManager.PodTemplate.Spec.SchedulingGates); diff != "" {
+			t.Errorf("restored TaskManager SchedulingGates mismatch (-want,+got):\n%s", diff)
+		}
+		if err := cl.Get(ctx, wlKey, &wl); err != nil {
+			t.Fatalf("cl.Get(wl after evict) error: %v", err)
+		}
+		if apimeta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadQuotaReserved) {
+			t.Fatal("QuotaReserved leaked True after eviction Reconcile()")
+		}
+	})
+
+	t.Run("suspended spec.podTemplate.spec.tolerations replacement and nil clearing do not wedge Stop or resurrect deleted tolerations", func(t *testing.T) {
+		ctx, _ := utiltesting.ContextWithLog(t)
+		tol1 := corev1.Toleration{Key: "tier", Operator: corev1.TolerationOpEqual, Value: "v1", Effect: corev1.TaintEffectNoSchedule}
+		tol2 := corev1.Toleration{Key: "tier", Operator: corev1.TolerationOpEqual, Value: "v2", Effect: corev1.TaintEffectNoSchedule}
+
+		initial := testingflinkdeployment.MakeFlinkDeployment("suspended-base-tols", "ns").
+			Queue("lq").
+			Suspend(true).
+			PodTemplate(&corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Tolerations: []corev1.Toleration{tol1}},
+			}).
+			Obj()
+		wlSnapshotPodSets, err := fromObject(initial.DeepCopy()).PodSets(ctx, nil)
+		if err != nil {
+			t.Fatalf("PodSets() error: %v", err)
+		}
+		restoreInfo := []podset.PodSetInfo{
+			podset.FromPodSet(&wlSnapshotPodSets[0]),
+			podset.FromPodSet(&wlSnapshotPodSets[1]),
+		}
+		wh := &flinkDeploymentWebhook{
+			integrationManager:           newTestIntegrationManager(t),
+			client:                       utiltesting.NewClientBuilder(flinkv1beta1.AddToScheme).WithObjects(utiltesting.MakeNamespace("ns")).Build(),
+			managedJobsNamespaceSelector: labels.Everything(),
+		}
+
+		// Case 1: replacing spec.podTemplate.spec.tolerations from [tol1] to [tol2] while suspended.
+		replaced := initial.DeepCopy()
+		replaced.Spec.PodTemplate.Spec.Tolerations = []corev1.Toleration{tol2}
+		replacedAfterRestore := replaced.DeepCopy()
+		if changed := fromObject(replacedAfterRestore).RestorePodSetsInfo(ctx, restoreInfo); changed {
+			t.Errorf("RestorePodSetsInfo() after base toleration replacement changed = true, want false")
+		}
+		if replacedAfterRestore.Spec.JobManager.PodTemplate != nil || replacedAfterRestore.Spec.TaskManager.PodTemplate != nil {
+			t.Fatalf("RestorePodSetsInfo() unexpectedly materialized role podTemplates: jm=%+v tm=%+v",
+				replacedAfterRestore.Spec.JobManager.PodTemplate, replacedAfterRestore.Spec.TaskManager.PodTemplate)
+		}
+		if _, err := wh.ValidateUpdate(ctx, replaced, replacedAfterRestore); err != nil {
+			t.Errorf("ValidateUpdate() rejected RestorePodSetsInfo after base toleration replacement: %v", err)
+		}
+
+		// Case 2: clearing spec.podTemplate = nil while suspended must not resurrect [tol1] onto role podTemplates.
+		cleared := initial.DeepCopy()
+		cleared.Spec.PodTemplate = nil
+		clearedAfterRestore := cleared.DeepCopy()
+		if changed := fromObject(clearedAfterRestore).RestorePodSetsInfo(ctx, restoreInfo); changed {
+			t.Errorf("RestorePodSetsInfo() after clearing spec.podTemplate changed = true, want false")
+		}
+		if clearedAfterRestore.Spec.JobManager.PodTemplate != nil || clearedAfterRestore.Spec.TaskManager.PodTemplate != nil {
+			t.Fatalf("RestorePodSetsInfo() resurrected deleted tolerations onto role podTemplates: jm=%+v tm=%+v",
+				clearedAfterRestore.Spec.JobManager.PodTemplate, clearedAfterRestore.Spec.TaskManager.PodTemplate)
+		}
+		clearedPodSets, err := fromObject(clearedAfterRestore).PodSets(ctx, nil)
+		if err != nil {
+			t.Fatalf("clearedAfterRestore PodSets() error: %v", err)
+		}
+		for i, ps := range clearedPodSets {
+			if len(ps.Template.Spec.Tolerations) != 0 {
+				t.Errorf("podSet[%d] resurrected tolerations = %+v, want empty", i, ps.Template.Spec.Tolerations)
 			}
 		}
-	}`
 
-	testCases := map[string]struct {
-		flavorTolerations []corev1.Toleration
-	}{
-		"with appended flavor toleration": {
-			flavorTolerations: []corev1.Toleration{
-				{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true", Effect: corev1.TaintEffectNoSchedule},
-			},
-		},
-		"without flavor toleration (nodeSelector overlay only)": {
-			flavorTolerations: nil,
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			ctx, log := utiltesting.ContextWithLog(t)
-
-			var initialFD flinkv1beta1.FlinkDeployment
-			if err := json.Unmarshal([]byte(rawInitial), &initialFD); err != nil {
-				t.Fatalf("json.Unmarshal(rawInitial) error: %v", err)
-			}
-			initialPodSets, err := fromObject(&initialFD).PodSets(ctx, nil)
-			if err != nil {
-				t.Fatalf("initial PodSets() error: %v", err)
-			}
-
-			cpuFlavorBuilder := utiltestingapi.MakeResourceFlavor("cpu-flavor").NodeLabel("pool", "cpu")
-			gpuFlavorBuilder := utiltestingapi.MakeResourceFlavor("gpu-flavor").NodeLabel("pool", "gpu")
-			for _, tol := range tc.flavorTolerations {
-				cpuFlavorBuilder = cpuFlavorBuilder.Toleration(tol)
-				gpuFlavorBuilder = gpuFlavorBuilder.Toleration(tol)
-			}
-			cpuFlavor := cpuFlavorBuilder.Obj()
-			gpuFlavor := gpuFlavorBuilder.Obj()
-
-			wlName := GetWorkloadNameForFlinkDeployment(initialFD.Name, initialFD.UID)
-			admittedWl := utiltestingapi.MakeWorkload(wlName, initialFD.Namespace).
-				Queue("lq").
-				PodSets(initialPodSets...).
-				ControllerReference(gvk, initialFD.Name, string(initialFD.UID)).
-				ReserveQuotaAt(
-					utiltestingapi.MakeAdmission("cq").
-						PodSets(
-							utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).
-								Assignment(corev1.ResourceCPU, "cpu-flavor", "1").
-								Obj(),
-							utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).
-								Assignment(corev1.ResourceCPU, "gpu-flavor", "2").
-								Obj(),
-						).
-						Obj(),
-					time.Now(),
-				).
-				AdmittedAt(true, time.Now()).
-				Obj()
-
-			builder := utiltesting.NewClientBuilder().WithObjects(&corev1.Namespace{Name: "ns"}, cpuFlavor, gpuFlavor, admittedWl)
-			if err := SetupIndexes(ctx, utiltesting.AsIndexer(builder)); err != nil {
-				t.Fatalf("SetupIndexes() error: %v", err)
-			}
-			cl := builder.Build()
-			wh := &flinkDeploymentWebhook{
-				integrationManager:           newTestIntegrationManager(t),
-				client:                       cl,
-				managedJobsNamespaceSelector: labels.Everything(),
-			}
-
-			if _, err := wh.ValidateCreate(ctx, &initialFD); err != nil {
-				t.Fatalf("ValidateCreate() unexpected error: %v", err)
-			}
-
-			wantJMTols := []corev1.Toleration{
-				{Key: "k1", Operator: corev1.TolerationOpExists, Value: "", Effect: corev1.TaintEffectNoSchedule},
-				{Key: "k2", Operator: corev1.TolerationOpEqual, Value: "v2", Effect: ""},
-			}
-			wantTMTols := []corev1.Toleration{
-				{Key: "", Operator: corev1.TolerationOpExists, Value: "", Effect: corev1.TaintEffectNoSchedule},
-				{Key: "k2", Operator: corev1.TolerationOpEqual, Value: "v2", Effect: corev1.TaintEffectNoExecute},
-			}
-			if diff := cmp.Diff(wantJMTols, initialPodSets[0].Template.Spec.Tolerations); diff != "" {
-				t.Fatalf("initial JobManager Tolerations mismatch (-want,+got):\n%s", diff)
-			}
-			if diff := cmp.Diff(wantTMTols, initialPodSets[1].Template.Spec.Tolerations); diff != "" {
-				t.Fatalf("initial TaskManager Tolerations mismatch (-want,+got):\n%s", diff)
-			}
-
-			assignInfo, err := expectedAdmittedPodSetsInfo(ctx, cl, admittedWl)
-			if err != nil {
-				t.Fatalf("expectedAdmittedPodSetsInfo() error: %v", err)
-			}
-
-			admitted := initialFD.DeepCopy()
-			if err := fromObject(admitted).RunWithPodSetsInfo(ctx, nil, assignInfo); err != nil {
-				t.Fatalf("RunWithPodSetsInfo() unexpected error: %v", err)
-			}
-
-			admittedBytes, err := json.Marshal(admitted)
-			if err != nil {
-				t.Fatalf("json.Marshal(admitted) error: %v", err)
-			}
-			var admittedWire flinkv1beta1.FlinkDeployment
-			if err := json.Unmarshal(admittedBytes, &admittedWire); err != nil {
-				t.Fatalf("json.Unmarshal(admittedBytes) error: %v", err)
-			}
-
-			if _, err := wh.ValidateUpdate(ctx, &initialFD, &admittedWire); err != nil {
-				t.Fatalf("ValidateUpdate(admission) unexpected error: %v\nadmitted JSON: %s", err, string(admittedBytes))
-			}
-
-			runningPodSets, err := fromObject(&admittedWire).PodSets(ctx, nil)
-			if err != nil {
-				t.Fatalf("running PodSets() error: %v", err)
-			}
-			wantRunning := make([]kueue.PodSet, len(initialPodSets))
-			for i := range initialPodSets {
-				wantRunning[i] = *initialPodSets[i].DeepCopy()
-				if err := podset.Merge(log, &wantRunning[i].Template.ObjectMeta, &wantRunning[i].Template.Spec, assignInfo[i]); err != nil {
-					t.Fatalf("podset.Merge(%d) error: %v", i, err)
-				}
-			}
-			if diff := cmp.Diff(wantRunning, runningPodSets); diff != "" {
-				t.Fatalf("running PodSets mismatch (-want,+got):\n%s", diff)
-			}
-
-			restoreInfo := []podset.PodSetInfo{
-				podset.FromPodSet(&initialPodSets[0]),
-				podset.FromPodSet(&initialPodSets[1]),
-			}
-			evicted := admittedWire.DeepCopy()
-			fromObject(evicted).Suspend()
-			if changed := fromObject(evicted).RestorePodSetsInfo(ctx, restoreInfo); !changed {
-				t.Fatal("expected RestorePodSetsInfo() to report changed=true")
-			}
-
-			evictedBytes, err := json.Marshal(evicted)
-			if err != nil {
-				t.Fatalf("json.Marshal(evicted) error: %v", err)
-			}
-			var evictedWire flinkv1beta1.FlinkDeployment
-			if err := json.Unmarshal(evictedBytes, &evictedWire); err != nil {
-				t.Fatalf("json.Unmarshal(evictedBytes) error: %v", err)
-			}
-
-			if _, err := wh.ValidateUpdate(ctx, &admittedWire, &evictedWire); err != nil {
-				t.Fatalf("ValidateUpdate(eviction) unexpected error: %v\nevicted JSON: %s", err, string(evictedBytes))
-			}
-
-			restoredPodSets, err := fromObject(&evictedWire).PodSets(ctx, nil)
-			if err != nil {
-				t.Fatalf("restored PodSets() error: %v", err)
-			}
-			if diff := cmp.Diff(initialPodSets, restoredPodSets); diff != "" {
-				t.Fatalf("restored PodSets mismatch (-want,+got):\n%s", diff)
-			}
-
-			for _, wantRawSubstring := range []string{
-				`"tolerations":[{"operator":"Exists","value":""},{"effect":""}]`,
-				`"tolerations":[{"key":"","operator":"Exists","value":""}]`,
-			} {
-				if !strings.Contains(string(evictedBytes), wantRawSubstring) {
-					t.Errorf("evicted JSON did not preserve raw toleration override %s:\n%s", wantRawSubstring, string(evictedBytes))
-				}
-			}
-		})
-	}
+		// Case 3: non-prefix slice sharing trailing element with baseSlice is not suffix-trimmed.
+		g0 := corev1.PodSchedulingGate{Name: "example.com/g0"}
+		g1 := corev1.PodSchedulingGate{Name: "example.com/g1"}
+		g2 := corev1.PodSchedulingGate{Name: "example.com/g2"}
+		gotNonPrefix := restoreRoleSlice(
+			[]corev1.PodSchedulingGate{g0, g2},
+			[]corev1.PodSchedulingGate{g0, g2},
+			[]corev1.PodSchedulingGate{g1, g2},
+			true,
+		)
+		if diff := cmp.Diff([]corev1.PodSchedulingGate{g0, g2}, gotNonPrefix); diff != "" {
+			t.Errorf("restoreRoleSlice() corrupted non-prefix slice (-want,+got):\n%s", diff)
+		}
+	})
 }

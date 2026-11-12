@@ -17,7 +17,11 @@ limitations under the License.
 package flinkdeployment
 
 import (
+	"encoding/json"
+	"slices"
+
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/kueue/pkg/controller/constants"
@@ -156,7 +160,17 @@ func (w *FlinkDeploymentWrapper) Parallelism(p int64) *FlinkDeploymentWrapper {
 
 // FlinkConfig sets a key-value pair in spec.flinkConfiguration.
 func (w *FlinkDeploymentWrapper) FlinkConfig(k, v string) *FlinkDeploymentWrapper {
-	w.Spec.FlinkConfiguration.Set(k, v)
+	var m map[string]any
+	if raw, err := w.Spec.FlinkConfiguration.MarshalJSON(); err == nil && len(raw) > 0 && string(raw) != "null" {
+		m, _ = flinkv1beta1.DecodeJSONMapUseNumber(raw)
+	}
+	if m == nil {
+		m = make(map[string]any)
+	}
+	m[k] = v
+	if encoded, err := json.Marshal(m); err == nil {
+		_ = w.Spec.FlinkConfiguration.UnmarshalJSON(encoded)
+	}
 	return w
 }
 
@@ -178,9 +192,39 @@ func (w *FlinkDeploymentWrapper) ImagePullPolicy(policy corev1.PullPolicy) *Flin
 	return w
 }
 
+// FromCorePodTemplateSpec converts a *corev1.PodTemplateSpec into a *flinkv1beta1.PodTemplateSpec for tests.
+func FromCorePodTemplateSpec(pt *corev1.PodTemplateSpec) *flinkv1beta1.PodTemplateSpec {
+	if pt == nil {
+		return nil
+	}
+	copied := pt.DeepCopy()
+	return &flinkv1beta1.PodTemplateSpec{ObjectMeta: copied.ObjectMeta, Spec: copied.Spec}
+}
+
+// MustParseQuantity parses str into a raw-preserving Quantity or panics.
+func MustParseQuantity(str string) flinkv1beta1.Quantity {
+	raw, err := json.Marshal(str)
+	if err != nil {
+		panic(err)
+	}
+	var q flinkv1beta1.Quantity
+	if err := q.UnmarshalJSON(raw); err != nil {
+		panic(err)
+	}
+	if q.ParseError() != nil {
+		panic(q.ParseError())
+	}
+	return q
+}
+
+// QuantityFromResource wraps a resource.Quantity into a flinkv1beta1.Quantity.
+func QuantityFromResource(rq resource.Quantity) flinkv1beta1.Quantity {
+	return MustParseQuantity(rq.String())
+}
+
 // PodTemplate sets the shared root spec.podTemplate.
 func (w *FlinkDeploymentWrapper) PodTemplate(pt *corev1.PodTemplateSpec) *FlinkDeploymentWrapper {
-	w.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(pt)
+	w.Spec.PodTemplate = FromCorePodTemplateSpec(pt)
 	return w
 }
 
@@ -207,13 +251,35 @@ func (w *FlinkDeploymentWrapper) JobManagerResource(cpu *float64, memory, epheme
 	return w
 }
 
+func resourceListFromCore(in corev1.ResourceList) flinkv1beta1.ResourceList {
+	if in == nil {
+		return nil
+	}
+	out := make(flinkv1beta1.ResourceList, len(in))
+	for k, v := range in {
+		out[k] = QuantityFromResource(v)
+	}
+	return out
+}
+
+func resourceRequirementsFromCore(in *corev1.ResourceRequirements) *flinkv1beta1.ResourceRequirements {
+	if in == nil {
+		return nil
+	}
+	return &flinkv1beta1.ResourceRequirements{
+		Limits:   resourceListFromCore(in.Limits),
+		Requests: resourceListFromCore(in.Requests),
+		Claims:   slices.Clone(in.Claims),
+	}
+}
+
 // JobManagerResources sets spec.jobManager.resources (Kubernetes ResourceRequirements) and clears spec.jobManager.resource.
 func (w *FlinkDeploymentWrapper) JobManagerResources(reqs corev1.ResourceRequirements) *FlinkDeploymentWrapper {
 	if w.Spec.JobManager == nil {
 		w.Spec.JobManager = &flinkv1beta1.JobManagerSpec{}
 	}
 	w.Spec.JobManager.Resource = nil
-	w.Spec.JobManager.Resources = flinkv1beta1.ResourceRequirementsFromCore(&reqs)
+	w.Spec.JobManager.Resources = resourceRequirementsFromCore(&reqs)
 	return w
 }
 
@@ -232,7 +298,7 @@ func (w *FlinkDeploymentWrapper) JobManagerPodTemplate(pt *corev1.PodTemplateSpe
 	if w.Spec.JobManager == nil {
 		w.Spec.JobManager = &flinkv1beta1.JobManagerSpec{}
 	}
-	w.Spec.JobManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(pt)
+	w.Spec.JobManager.PodTemplate = FromCorePodTemplateSpec(pt)
 	return w
 }
 
@@ -265,7 +331,7 @@ func (w *FlinkDeploymentWrapper) TaskManagerResources(reqs corev1.ResourceRequir
 		w.Spec.TaskManager = &flinkv1beta1.TaskManagerSpec{}
 	}
 	w.Spec.TaskManager.Resource = nil
-	w.Spec.TaskManager.Resources = flinkv1beta1.ResourceRequirementsFromCore(&reqs)
+	w.Spec.TaskManager.Resources = resourceRequirementsFromCore(&reqs)
 	return w
 }
 
@@ -284,7 +350,7 @@ func (w *FlinkDeploymentWrapper) TaskManagerPodTemplate(pt *corev1.PodTemplateSp
 	if w.Spec.TaskManager == nil {
 		w.Spec.TaskManager = &flinkv1beta1.TaskManagerSpec{}
 	}
-	w.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(pt)
+	w.Spec.TaskManager.PodTemplate = FromCorePodTemplateSpec(pt)
 	return w
 }
 

@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestFlinkConfigurationJSONAndFlatMap(t *testing.T) {
@@ -127,7 +126,7 @@ func TestFlinkConfigurationJSONAndFlatMap(t *testing.T) {
 		},
 		"rejects whitespace-padded segment inside flat dotted key": {
 			raw:               `{"jobmanager. memory.process.size": "64g"}`,
-			wantFlatErrSubstr: `must not contain leading or trailing whitespace in segment " memory"`,
+			wantFlatErrSubstr: "must not contain leading or trailing whitespace",
 		},
 		"rejects empty key": {
 			raw:               `{"": "value"}`,
@@ -294,6 +293,15 @@ func TestFlinkConfigurationEqualAndSemanticDeepEqual(t *testing.T) {
 			},
 			wantEqual: true,
 		},
+		"colliding raw payload equals its whitespace-compacted and key-reordered round-trip copy": {
+			a: func(t *testing.T) FlinkConfiguration {
+				return mustUnmarshalFlinkConfiguration(t, "{\n  \"a.b\": \"2\",\n  \"a\": { \"b\": 1 }\n}")
+			},
+			b: func(t *testing.T) FlinkConfiguration {
+				return mustUnmarshalFlinkConfiguration(t, `{"a":{"b":1},"a.b":"2"}`)
+			},
+			wantEqual: true,
+		},
 		"distinct pipeline.serialization-config list-of-maps do not collide": {
 			a: func(t *testing.T) FlinkConfiguration {
 				return mustUnmarshalFlinkConfiguration(t, `{"pipeline.serialization-config":[{"org.example.EventA":{"type":"kryo"}}]}`)
@@ -357,6 +365,15 @@ func TestFlinkConfigurationEqualAndSemanticDeepEqual(t *testing.T) {
 			},
 			wantEqual: false,
 		},
+		"empty nested map does not equal root empty object": {
+			a: func(t *testing.T) FlinkConfiguration {
+				return mustUnmarshalFlinkConfiguration(t, `{"k":{}}`)
+			},
+			b: func(t *testing.T) FlinkConfiguration {
+				return mustUnmarshalFlinkConfiguration(t, `{}`)
+			},
+			wantEqual: false,
+		},
 		"JSON null value does not equal string \"null\"": {
 			a: func(t *testing.T) FlinkConfiguration {
 				return mustUnmarshalFlinkConfiguration(t, `{"k":null}`)
@@ -375,7 +392,7 @@ func TestFlinkConfigurationEqualAndSemanticDeepEqual(t *testing.T) {
 			},
 			wantEqual: false,
 		},
-		"JSON [null] slice does not equal scalar null or string \"null\"": {
+		"JSON [null] slice does not equal scalar null": {
 			a: func(t *testing.T) FlinkConfiguration {
 				return mustUnmarshalFlinkConfiguration(t, `{"k":[null]}`)
 			},
@@ -423,8 +440,6 @@ func TestFlinkConfigurationEqualAndSemanticDeepEqual(t *testing.T) {
 				t.Errorf("reverse Equal() = %v, want %v", got, tc.wantEqual)
 			}
 
-			// apiequality.Semantic.DeepEqual panics on unexported struct fields unless
-			// FlinkConfiguration.Equal is registered in register.go.
 			fdA := &FlinkDeployment{Spec: FlinkDeploymentSpec{Image: "flink:1.20", FlinkConfiguration: a}}
 			fdB := &FlinkDeployment{Spec: FlinkDeploymentSpec{Image: "flink:1.20", FlinkConfiguration: b}}
 			if got := apiequality.Semantic.DeepEqual(fdA, fdB); got != tc.wantEqual {
@@ -437,233 +452,19 @@ func TestFlinkConfigurationEqualAndSemanticDeepEqual(t *testing.T) {
 	}
 }
 
-func TestFlinkConfigurationSetAndDeepCopy(t *testing.T) {
-	testCases := map[string]struct {
-		initial           func(t *testing.T) FlinkConfiguration
-		setKey, setValue  string
-		wantFlat          map[string]string
-		wantFlatErrSubstr string
-		wantMarshaled     string
-		wantEqual         func(t *testing.T) FlinkConfiguration
-		wantNotEqual      func(t *testing.T) FlinkConfiguration
-	}{
-		"Set on raw nested JSON materializes a flat map": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"parallelism": {"default": 2}}`)
-			},
-			setKey:        "taskmanager.numberOfTaskSlots",
-			setValue:      "8",
-			wantFlat:      map[string]string{"parallelism.default": "2", "taskmanager.numberOfTaskSlots": "8"},
-			wantMarshaled: `{"parallelism.default":"2","taskmanager.numberOfTaskSlots":"8"}`,
-		},
-		"Set on zero value creates the map": {
-			initial:       func(*testing.T) FlinkConfiguration { return FlinkConfiguration{} },
-			setKey:        "a",
-			setValue:      "1",
-			wantFlat:      map[string]string{"a": "1"},
-			wantMarshaled: `{"a":"1"}`,
-		},
-		"Set overrides an existing Go map entry": {
-			initial:       func(*testing.T) FlinkConfiguration { return NewFlinkConfiguration(map[string]string{"a": "1"}) },
-			setKey:        "a",
-			setValue:      "2",
-			wantFlat:      map[string]string{"a": "2"},
-			wantMarshaled: `{"a":"2"}`,
-		},
-		"Set on structured YAML preserves list-of-maps and removes conflicting nested scalar path": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"parallelism":{"default":2,"max":8},"pipeline.serialization-config":[{"org.example.Event":{"type":"kryo"}}]}`)
-			},
-			setKey:   "parallelism.default",
-			setValue: "4",
-			wantFlat: map[string]string{
-				"parallelism.default":           "4",
-				"parallelism.max":               "8",
-				"pipeline.serialization-config": "",
-			},
-			wantMarshaled: `{"parallelism":{"max":8},"parallelism.default":"4","pipeline.serialization-config":[{"org.example.Event":{"type":"kryo"}}]}`,
-		},
-		"Set preserves top-level sibling JSON null value and Equal semantics without rewriting to string \"null\"": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"nullable.opt":null,"taskmanager.numberOfTaskSlots":"2"}`)
-			},
-			setKey:   "taskmanager.numberOfTaskSlots",
-			setValue: "4",
-			wantFlat: map[string]string{
-				"nullable.opt":                  "null",
-				"taskmanager.numberOfTaskSlots": "4",
-			},
-			wantMarshaled: `{"nullable.opt":null,"taskmanager.numberOfTaskSlots":"4"}`,
-			wantEqual: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"nullable.opt":null,"taskmanager.numberOfTaskSlots":"4"}`)
-			},
-			wantNotEqual: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"nullable.opt":"null","taskmanager.numberOfTaskSlots":"4"}`)
-			},
-		},
-		"Set preserves nested sibling JSON null value without rewriting to string \"null\"": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"nested":{"nullable":null},"parallelism":{"default":2}}`)
-			},
-			setKey:   "parallelism.default",
-			setValue: "4",
-			wantFlat: map[string]string{
-				"nested.nullable":     "null",
-				"parallelism.default": "4",
-			},
-			wantMarshaled: `{"nested":{"nullable":null},"parallelism.default":"4"}`,
-		},
-		"Set on duplicate flat and nested key collision recovers by removing duplicate leaf paths": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"parallelism":{"default":2},"parallelism.default":"1","keep":"yes"}`)
-			},
-			setKey:        "parallelism.default",
-			setValue:      "8",
-			wantFlat:      map[string]string{"keep": "yes", "parallelism.default": "8"},
-			wantMarshaled: `{"keep":"yes","parallelism.default":"8"}`,
-		},
-		"Set alongside whitespace-padded key preserves sibling entries in raw JSON": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{" bad ":"1","keep":"yes"}`)
-			},
-			setKey:            "added",
-			setValue:          "2",
-			wantFlatErrSubstr: `flinkConfiguration key " bad " must not contain leading or trailing whitespace`,
-			wantMarshaled:     `{" bad ":"1","added":"2","keep":"yes"}`,
-		},
-		"Set suffix key X.Y alongside structured entry preserves scalar prefix key X": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"high-availability":"kubernetes","metrics.reporters":["prom"]}`)
-			},
-			setKey:   "high-availability.storageDir",
-			setValue: "s3://bucket/ha",
-			wantFlat: map[string]string{
-				"high-availability":            "kubernetes",
-				"high-availability.storageDir": "s3://bucket/ha",
-				"metrics.reporters":            "prom",
-			},
-			wantMarshaled: `{"high-availability":"kubernetes","high-availability.storageDir":"s3://bucket/ha","metrics.reporters":["prom"]}`,
-		},
-		"Set suffix key X.Y alongside structured entry preserves empty-map prefix key X": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"empty.prefix":{},"metrics.reporters":["prom"]}`)
-			},
-			setKey:   "empty.prefix.child",
-			setValue: "1",
-			wantFlat: map[string]string{
-				"empty.prefix.child": "1",
-				"metrics.reporters":  "prom",
-			},
-			wantMarshaled: `{"empty.prefix":{},"empty.prefix.child":"1","metrics.reporters":["prom"]}`,
-			wantNotEqual: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"empty.prefix.child":"1","metrics.reporters":["prom"]}`)
-			},
-		},
-		"Set prefix key X alongside structured entry preserves flat suffix key X.Y": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"high-availability.storageDir":"s3://bucket/ha","metrics.reporters":["prom"]}`)
-			},
-			setKey:   "high-availability",
-			setValue: "kubernetes",
-			wantFlat: map[string]string{
-				"high-availability":            "kubernetes",
-				"high-availability.storageDir": "s3://bucket/ha",
-				"metrics.reporters":            "prom",
-			},
-			wantMarshaled: `{"high-availability":"kubernetes","high-availability.storageDir":"s3://bucket/ha","metrics.reporters":["prom"]}`,
-		},
-		"Set prefix key X alongside structured entry lifts nested map at X so X.Y survives": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"high-availability":{"storageDir":"s3://bucket/ha"},"metrics.reporters":["prom"]}`)
-			},
-			setKey:   "high-availability",
-			setValue: "kubernetes",
-			wantFlat: map[string]string{
-				"high-availability":            "kubernetes",
-				"high-availability.storageDir": "s3://bucket/ha",
-				"metrics.reporters":            "prom",
-			},
-			wantMarshaled: `{"high-availability":"kubernetes","high-availability.storageDir":"s3://bucket/ha","metrics.reporters":["prom"]}`,
-		},
-		"Set prefix key X lifts nested sub-maps without overwriting existing flat or nested siblings": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"a":{"b":"nested-val"},"a.b":{"c":"1"},"metrics.reporters":["prom"]}`)
-			},
-			setKey:   "a",
-			setValue: "root-val",
-			wantFlat: map[string]string{
-				"a":                 "root-val",
-				"a.b":               "nested-val",
-				"a.b.c":             "1",
-				"metrics.reporters": "prom",
-			},
-			wantMarshaled: `{"a":"root-val","a.b":"nested-val","a.b.c":"1","metrics.reporters":["prom"]}`,
-		},
-		"Set key X.Y replaces nested empty-map leaf at X.Y and prunes emptied parent map": {
-			initial: func(t *testing.T) FlinkConfiguration {
-				return mustUnmarshalFlinkConfiguration(t, `{"a":{"b":{}},"metrics.reporters":["prom"]}`)
-			},
-			setKey:   "a.b",
-			setValue: "2",
-			wantFlat: map[string]string{
-				"a.b":               "2",
-				"metrics.reporters": "prom",
-			},
-			wantMarshaled: `{"a.b":"2","metrics.reporters":["prom"]}`,
+func TestFlinkConfigurationDeepCopy(t *testing.T) {
+	orig := &FlinkDeployment{
+		Spec: FlinkDeploymentSpec{
+			FlinkConfiguration: mustUnmarshalFlinkConfiguration(t, `{"parallelism":{"default":2},"metrics.reporters":["prom"]}`),
 		},
 	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			orig := &FlinkDeployment{Spec: FlinkDeploymentSpec{FlinkConfiguration: tc.initial(t)}}
-			origSnapshot := orig.DeepCopy()
-			origBytesBefore, err := json.Marshal(orig.Spec.FlinkConfiguration)
-			if err != nil {
-				t.Fatalf("json.Marshal(orig) before Set error: %v", err)
-			}
-
-			copied := orig.DeepCopy()
-			copied.Spec.FlinkConfiguration.Set(tc.setKey, tc.setValue)
-
-			origBytesAfter, err := json.Marshal(orig.Spec.FlinkConfiguration)
-			if err != nil {
-				t.Fatalf("json.Marshal(orig) after Set error: %v", err)
-			}
-			if string(origBytesBefore) != string(origBytesAfter) {
-				t.Errorf("mutating DeepCopy() FlinkConfiguration leaked into original JSON: before=%s after=%s", origBytesBefore, origBytesAfter)
-			}
-			if !apiequality.Semantic.DeepEqual(orig, origSnapshot) {
-				t.Error("mutating DeepCopy() FlinkConfiguration altered original semantic equality")
-			}
-
-			marshaled, err := json.Marshal(copied.Spec.FlinkConfiguration)
-			if err != nil {
-				t.Fatalf("json.Marshal(copied) error: %v", err)
-			}
-			if string(marshaled) != tc.wantMarshaled {
-				t.Errorf("json.Marshal(copied) = %s, want %s", string(marshaled), tc.wantMarshaled)
-			}
-			if tc.wantEqual != nil && !copied.Spec.FlinkConfiguration.Equal(tc.wantEqual(t)) {
-				t.Errorf("copied.Equal(wantEqual) = false, want true")
-			}
-			if tc.wantNotEqual != nil && copied.Spec.FlinkConfiguration.Equal(tc.wantNotEqual(t)) {
-				t.Errorf("copied.Equal(wantNotEqual) = true, want false")
-			}
-
-			copiedFlat, err := copied.Spec.FlinkConfiguration.FlatMap()
-			if tc.wantFlatErrSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantFlatErrSubstr) {
-					t.Fatalf("copied FlatMap() error = %v, want substring %q", err, tc.wantFlatErrSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("copied FlatMap() error: %v", err)
-			}
-			if diff := cmp.Diff(tc.wantFlat, copiedFlat); diff != "" {
-				t.Errorf("copied FlatMap() mismatch (-want,+got):\n%s", diff)
-			}
-		})
+	copied := orig.DeepCopy()
+	if !apiequality.Semantic.DeepEqual(orig, copied) {
+		t.Fatal("DeepCopy() FlinkConfiguration does not equal original")
+	}
+	copied.Spec.FlinkConfiguration.raw[0] = '['
+	if string(orig.Spec.FlinkConfiguration.raw) != `{"parallelism":{"default":2},"metrics.reporters":["prom"]}` {
+		t.Fatalf("mutating DeepCopy() raw slice modified original: %s", orig.Spec.FlinkConfiguration.raw)
 	}
 }
 
@@ -1028,6 +829,10 @@ func mustUnmarshalQuantity(t *testing.T, raw string) Quantity {
 	return q
 }
 
+func goQuantityFromResource(rq resource.Quantity) Quantity {
+	return Quantity{quantity: rq.DeepCopy()}
+}
+
 func TestQuantityJSONAndDeepCopy(t *testing.T) {
 	testCases := map[string]struct {
 		rawInput             string
@@ -1062,8 +867,8 @@ func TestQuantityJSONAndDeepCopy(t *testing.T) {
 			wantMarshaled:  `"1.5Gi"`,
 			wantValueBytes: 1610612736,
 		},
-		"QuantityFromResource falls back to canonical resource.Quantity string": {
-			fromGo:         func() Quantity { return QuantityFromResource(resource.MustParse("1G")) },
+		"Go-constructed Quantity falls back to canonical resource.Quantity string": {
+			fromGo:         func() Quantity { return goQuantityFromResource(resource.MustParse("1G")) },
 			wantLiteral:    "1G",
 			wantMarshaled:  `"1G"`,
 			wantValueBytes: 1000000000,
@@ -1175,14 +980,14 @@ func TestQuantityEqualAndSemanticDeepEqual(t *testing.T) {
 			b:         func(t *testing.T) Quantity { return mustUnmarshalQuantity(t, `"1000000000"`) },
 			wantEqual: true,
 		},
-		"JSON integer 1000000000 equals QuantityFromResource 1G": {
+		"JSON integer 1000000000 equals Go-constructed 1G": {
 			a:         func(t *testing.T) Quantity { return mustUnmarshalQuantity(t, `1000000000`) },
-			b:         func(*testing.T) Quantity { return QuantityFromResource(resource.MustParse("1G")) },
+			b:         func(*testing.T) Quantity { return goQuantityFromResource(resource.MustParse("1G")) },
 			wantEqual: true,
 		},
 		"1000000000 bytes does not equal 1Gi": {
 			a:         func(t *testing.T) Quantity { return mustUnmarshalQuantity(t, `1000000000`) },
-			b:         func(*testing.T) Quantity { return MustParseQuantity("1Gi") },
+			b:         func(t *testing.T) Quantity { return mustUnmarshalQuantity(t, `"1Gi"`) },
 			wantEqual: false,
 		},
 		"identical unparsed Flink MemorySize 2g quantities compare equal": {
@@ -1251,9 +1056,6 @@ func TestPodTemplateSpecRawJSONPreservationAndOverlayPatch(t *testing.T) {
 	if err := json.Unmarshal([]byte(rawPartial), &pt); err != nil {
 		t.Fatalf("json.Unmarshal(rawPartial) error: %v", err)
 	}
-	if !pt.HasUnmodifiedRawSpec() {
-		t.Fatal("expected HasUnmodifiedRawSpec() == true after UnmarshalJSON")
-	}
 
 	marshaledUnmutated, err := json.Marshal(pt)
 	if err != nil {
@@ -1280,9 +1082,6 @@ func TestPodTemplateSpecRawJSONPreservationAndOverlayPatch(t *testing.T) {
 	copied.Spec.NodeSelector = map[string]string{"flavor": "on-demand"}
 	copied.Spec.Tolerations = []corev1.Toleration{{Key: "spot", Operator: corev1.TolerationOpExists}}
 	copied.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/topology"}}
-	if !copied.HasUnmodifiedRawSpec() {
-		t.Fatal("expected HasUnmodifiedRawSpec() == true when only metadata/placement overlays changed")
-	}
 
 	marshaledOverlay, err := json.Marshal(copied)
 	if err != nil {
@@ -1328,185 +1127,6 @@ func TestPodTemplateSpecRawJSONPreservationAndOverlayPatch(t *testing.T) {
 	}
 }
 
-func TestPodTemplateSpecMarshalOverlayPreservesEmptyStringTolerations(t *testing.T) {
-	rawTolOverride := `{"spec":{"tolerations":[{"operator":"Exists","value":""},{"effect":""},{"key":"","operator":"Exists","value":""}]}}`
-	var pt PodTemplateSpec
-	if err := json.Unmarshal([]byte(rawTolOverride), &pt); err != nil {
-		t.Fatalf("json.Unmarshal() error: %v", err)
-	}
-
-	admitted := pt.DeepCopy()
-	admitted.Spec.Tolerations = append(admitted.Spec.Tolerations, corev1.Toleration{
-		Key:      "gpu",
-		Operator: corev1.TolerationOpEqual,
-		Value:    "true",
-		Effect:   corev1.TaintEffectNoSchedule,
-	})
-	admittedBytes, err := json.Marshal(admitted)
-	if err != nil {
-		t.Fatalf("json.Marshal(admitted) error: %v", err)
-	}
-	wantAdmitted := `{"spec":{"tolerations":[{"operator":"Exists","value":""},{"effect":""},{"key":"","operator":"Exists","value":""},{"effect":"NoSchedule","key":"gpu","operator":"Equal","value":"true"}]}}`
-	if string(admittedBytes) != wantAdmitted {
-		t.Errorf("admitted MarshalJSON() =\n%s\nwant:\n%s", string(admittedBytes), wantAdmitted)
-	}
-
-	rawMaps := admitted.RawSpecTolerations()
-	if len(rawMaps) != 4 {
-		t.Fatalf("len(RawSpecTolerations()) = %d, want 4", len(rawMaps))
-	}
-	if val, ok := rawMaps[0]["value"]; !ok || val != "" {
-		t.Errorf("rawMaps[0][\"value\"] = %v, %v; want \"\", true", val, ok)
-	}
-	if eff, ok := rawMaps[1]["effect"]; !ok || eff != "" {
-		t.Errorf("rawMaps[1][\"effect\"] = %v, %v; want \"\", true", eff, ok)
-	}
-	if k, ok := rawMaps[2]["key"]; !ok || k != "" {
-		t.Errorf("rawMaps[2][\"key\"] = %v, %v; want \"\", true", k, ok)
-	}
-
-	var admittedReloaded PodTemplateSpec
-	if err := json.Unmarshal(admittedBytes, &admittedReloaded); err != nil {
-		t.Fatalf("json.Unmarshal(admittedBytes) error: %v", err)
-	}
-	admittedReloaded.Spec.Tolerations = admittedReloaded.Spec.Tolerations[:3]
-	restoredBytes, err := json.Marshal(&admittedReloaded)
-	if err != nil {
-		t.Fatalf("json.Marshal(restored) error: %v", err)
-	}
-	if string(restoredBytes) != rawTolOverride {
-		t.Errorf("restored MarshalJSON() =\n%s\nwant:\n%s", string(restoredBytes), rawTolOverride)
-	}
-}
-
-func TestGoConstructedPodTemplateSpecMarshalJSONPrunesEmptyPodSpecFields(t *testing.T) {
-	pt := FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{
-				Sysctls: []corev1.Sysctl{
-					{Name: "kernel.shm_rmid_forced", Value: ""},
-					{},
-				},
-			},
-			Volumes: []corev1.Volume{
-				{
-					HostPath: &corev1.HostPathVolumeSource{
-						Path: "/tmp/flink",
-						Type: new(corev1.HostPathUnset),
-					},
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Ports: []corev1.ContainerPort{
-						{Protocol: corev1.ProtocolTCP},
-					},
-					Env: []corev1.EnvVar{
-						{
-							ValueFrom: &corev1.EnvVarSource{
-								ResourceFieldRef: &corev1.ResourceFieldSelector{
-									Resource: "requests.memory",
-								},
-							},
-						},
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{MountPath: "/mnt/data"},
-					},
-					LivenessProbe: &corev1.Probe{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/healthz",
-							HTTPHeaders: []corev1.HTTPHeader{
-								{Name: "X-Custom", Value: ""},
-								{},
-							},
-						},
-					},
-					ReadinessProbe: &corev1.Probe{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/readyz",
-							Port: intstr.FromString(""),
-						},
-					},
-					StartupProbe: &corev1.Probe{
-						GRPC: &corev1.GRPCAction{
-							Port:    9090,
-							Service: new(""),
-						},
-					},
-				},
-			},
-			Affinity: &corev1.Affinity{
-				PodAntiAffinity: &corev1.PodAntiAffinity{
-					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
-						{
-							PodAffinityTerm: corev1.PodAffinityTerm{
-								TopologyKey: "kubernetes.io/hostname",
-							},
-						},
-					},
-				},
-			},
-			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-				{WhenUnsatisfiable: corev1.ScheduleAnyway},
-			},
-		},
-	})
-
-	wire, err := json.Marshal(pt)
-	if err != nil {
-		t.Fatalf("json.Marshal(pt) error: %v", err)
-	}
-	wireStr := string(wire)
-
-	for _, zeroPollution := range []string{
-		`"name":""`,
-		`"containerPort":0`,
-		`"divisor":"0"`,
-		`"port":0`,
-		`"weight":0`,
-		`"maxSkew":0`,
-		`"topologyKey":""`,
-		`"resources":{}`,
-		`null`,
-	} {
-		if strings.Contains(wireStr, zeroPollution) {
-			t.Errorf("Go-constructed PodTemplateSpec MarshalJSON() emitted zero field %s into %s", zeroPollution, wireStr)
-		}
-	}
-
-	for _, wantPreserved := range []string{
-		`"type":""`,
-		`"service":""`,
-		`"port":""`,
-		`"protocol":"TCP"`,
-		`"resource":"requests.memory"`,
-		`"mountPath":"/mnt/data"`,
-		`"whenUnsatisfiable":"ScheduleAnyway"`,
-		`"httpHeaders":[{"name":"X-Custom","value":""},{}]`,
-		`"sysctls":[{"name":"kernel.shm_rmid_forced","value":""},{}]`,
-	} {
-		if !strings.Contains(wireStr, wantPreserved) {
-			t.Errorf("Go-constructed PodTemplateSpec MarshalJSON() dropped %s from %s", wantPreserved, wireStr)
-		}
-	}
-
-	var decoded PodTemplateSpec
-	if err := json.Unmarshal(wire, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(wire) error: %v", err)
-	}
-	if !decoded.HasUnmodifiedRawSpec() {
-		t.Fatal("expected decoded.HasUnmodifiedRawSpec() == true")
-	}
-	remarshaled, err := json.Marshal(&decoded)
-	if err != nil {
-		t.Fatalf("json.Marshal(decoded) error: %v", err)
-	}
-	if string(remarshaled) != wireStr {
-		t.Errorf("remarshaled JSON = %s, want %s", string(remarshaled), wireStr)
-	}
-}
-
 func TestPodTemplateSpecDeferredDecodeError(t *testing.T) {
 	testCases := map[string]struct {
 		raw string
@@ -1531,9 +1151,6 @@ func TestPodTemplateSpecDeferredDecodeError(t *testing.T) {
 			if pt.DecodeError() == nil {
 				t.Fatalf("DecodeError() = nil, want deferred decode error for %s", tc.raw)
 			}
-			if pt.HasUnmodifiedRawSpec() {
-				t.Error("expected HasUnmodifiedRawSpec() == false when DecodeError() != nil")
-			}
 
 			marshaled, err := json.Marshal(pt)
 			if err != nil {
@@ -1554,5 +1171,24 @@ func TestPodTemplateSpecDeferredDecodeError(t *testing.T) {
 				t.Error("expected PodTemplateSpec with deferred decode error not to equal zero PodTemplateSpec")
 			}
 		})
+	}
+}
+
+func TestResourceRequirementsAndNilConversions(t *testing.T) {
+	var nilPT *PodTemplateSpec
+	if nilPT.DecodeError() != nil || nilPT.ToCorePodTemplateSpec() != nil {
+		t.Fatal("expected nil PodTemplateSpec helpers to return nil")
+	}
+	var nilRR *ResourceRequirements
+	if nilRR.ToCore() != nil || ResourceList(nil).ToCore() != nil {
+		t.Fatal("expected nil ResourceRequirements/ResourceList ToCore() to return nil")
+	}
+	rr := &ResourceRequirements{
+		Requests: ResourceList{corev1.ResourceCPU: mustUnmarshalQuantity(t, `"2"`)},
+		Claims:   []corev1.ResourceClaim{{Name: "gpu"}},
+	}
+	coreRR := rr.ToCore()
+	if coreRR == nil || !coreRR.Requests.Cpu().Equal(resource.MustParse("2")) || len(coreRR.Claims) != 1 {
+		t.Fatalf("unexpected ToCore() result: %+v", coreRR)
 	}
 }

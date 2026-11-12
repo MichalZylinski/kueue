@@ -17,7 +17,6 @@ limitations under the License.
 package flinkdeployment
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,11 +35,9 @@ import (
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/yaml"
 
@@ -53,11 +50,9 @@ import (
 	flinkv1beta1 "sigs.k8s.io/kueue/pkg/controller/jobs/flinkdeployment/apis/v1beta1"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
-	"sigs.k8s.io/kueue/pkg/util/tas"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingflinkdeployment "sigs.k8s.io/kueue/pkg/util/testingjobs/flinkdeployment"
-	"sigs.k8s.io/kueue/pkg/workload"
 )
 
 func newTestIntegrationManager(t *testing.T) *jobframework.IntegrationManager {
@@ -700,7 +695,7 @@ func TestValidateCreate(t *testing.T) {
 				fd.Spec.TaskManager = &flinkv1beta1.TaskManagerSpec{
 					Resources: &flinkv1beta1.ResourceRequirements{
 						Requests: flinkv1beta1.ResourceList{
-							corev1.ResourceCPU: flinkv1beta1.MustParseQuantity("1"),
+							corev1.ResourceCPU: testingflinkdeployment.MustParseQuantity("1"),
 						},
 					},
 				}
@@ -796,7 +791,7 @@ func TestValidateCreate(t *testing.T) {
 				JobManagerResource(new(1.0), "1Ei", "").
 				TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("2Pi"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("2Pi"),
 					},
 				}).
 				Obj(),
@@ -1033,7 +1028,7 @@ func TestValidateCreate(t *testing.T) {
 				),
 			},
 		},
-		"rejects kubernetes.operator.deployment.rollback.enabled=true because in-memory rollback restores stale placement and parallelism": {
+		"rejects kubernetes.operator.deployment.rollback.enabled=true": {
 			job: testingflinkdeployment.MakeFlinkDeployment("rollback-enabled", "ns").
 				Queue("lq").
 				FlinkConfig("kubernetes.operator.deployment.rollback.enabled", "true").
@@ -1041,7 +1036,7 @@ func TestValidateCreate(t *testing.T) {
 			wantErrs: field.ErrorList{
 				field.Forbidden(
 					field.NewPath("spec", "flinkConfiguration").Key("kubernetes.operator.deployment.rollback.enabled"),
-					"automatic Flink Operator deployment rollback is not supported for a Kueue-managed FlinkDeployment because in-memory rollback restores lastStableSpec placement and parallelism without updating spec",
+					"automatic Flink Operator deployment rollback is not supported for a Kueue-managed FlinkDeployment",
 				),
 			},
 		},
@@ -1127,7 +1122,7 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec", "jobManager", "resources"),
 					nil,
-					`resource request memory (2g): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes because Flink interprets "2g" incompatibly or rejects it`,
+					`resource request memory (2g): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "2g" incompatibly or rejects it`,
 				),
 			},
 		},
@@ -1166,7 +1161,11 @@ func TestValidateCreate(t *testing.T) {
 				Obj(),
 			wantErrs: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "jobManager", "resources"), nil, "resource request cpu (0) must be greater than 0"),
-				field.Invalid(field.NewPath("spec", "taskManager", "resources"), nil, "resource request memory (1m) must be at least 1 byte"),
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "resources"),
+					nil,
+					`resource request memory (1m): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "1m" incompatibly or rejects it`,
+				),
 			},
 		},
 		"rejects whitespace-padded nested key segment in flinkConfiguration": {
@@ -1216,7 +1215,7 @@ func TestValidateCreate(t *testing.T) {
 					Obj()
 				fd.Spec.TaskManager.Resources = &flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceCPU: flinkv1beta1.MustParseQuantity("2"),
+						corev1.ResourceCPU: testingflinkdeployment.MustParseQuantity("2"),
 					},
 				}
 				return fd
@@ -1225,7 +1224,7 @@ func TestValidateCreate(t *testing.T) {
 				field.Forbidden(field.NewPath("spec", "taskManager", "resources"), "may not be specified when resource is also specified"),
 			},
 		},
-		"accepts plain integer byte literals, JSON number 1000000000, and 1Pi in component resources": {
+		"rejects plain integer byte literals in component resources while accepting 1Pi BinarySI": {
 			job: func() *flinkv1beta1.FlinkDeployment {
 				var numQty flinkv1beta1.Quantity
 				if err := json.Unmarshal([]byte(`1000000000`), &numQty); err != nil {
@@ -1235,36 +1234,40 @@ func TestValidateCreate(t *testing.T) {
 					Queue("lq").
 					JobManagerRawResources(flinkv1beta1.ResourceRequirements{
 						Requests: flinkv1beta1.ResourceList{
-							corev1.ResourceCPU:    flinkv1beta1.MustParseQuantity("1"),
-							corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1024000"),
-						},
-						Limits: flinkv1beta1.ResourceList{
+							corev1.ResourceCPU:    testingflinkdeployment.MustParseQuantity("1"),
 							corev1.ResourceMemory: numQty,
 						},
 					}).
 					TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 						Requests: flinkv1beta1.ResourceList{
-							corev1.ResourceCPU:    flinkv1beta1.MustParseQuantity("2"),
-							corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1073741824"),
+							corev1.ResourceCPU:    testingflinkdeployment.MustParseQuantity("2"),
+							corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1024Mi"),
 						},
 						Limits: flinkv1beta1.ResourceList{
-							corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1Pi"),
+							corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1Pi"),
 						},
 					}).
 					Obj()
 			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "resources"),
+					nil,
+					`resource request memory (1000000000): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "1000000000" incompatibly or rejects it`,
+				),
+			},
 		},
 		"rejects fractional BinarySI memory literals and Ei suffixes in component resources.requests": {
 			job: testingflinkdeployment.MakeFlinkDeployment("bad-raw-mem-requests", "ns").
 				Queue("lq").
 				JobManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("1.5Gi"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("1.5Gi"),
 					},
 				}).
 				TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 					Requests: flinkv1beta1.ResourceList{
-						corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("8Ei"),
+						corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("8Ei"),
 					},
 				}).
 				Obj(),
@@ -1272,12 +1275,12 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec", "jobManager", "resources"),
 					nil,
-					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes`,
+					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)`,
 				),
 				field.Invalid(
 					field.NewPath("spec", "taskManager", "resources"),
 					nil,
-					`resource request memory (8Ei): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes because Flink interprets "8Ei" incompatibly or rejects it`,
+					`resource request memory (8Ei): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "8Ei" incompatibly or rejects it`,
 				),
 			},
 		},
@@ -1294,7 +1297,7 @@ func TestValidateCreate(t *testing.T) {
 					Queue("lq").
 					JobManagerRawResources(flinkv1beta1.ResourceRequirements{
 						Requests: flinkv1beta1.ResourceList{
-							corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("512Mi"),
+							corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("512Mi"),
 						},
 						Limits: flinkv1beta1.ResourceList{
 							corev1.ResourceMemory: sciQty,
@@ -1302,7 +1305,7 @@ func TestValidateCreate(t *testing.T) {
 					}).
 					TaskManagerRawResources(flinkv1beta1.ResourceRequirements{
 						Requests: flinkv1beta1.ResourceList{
-							corev1.ResourceMemory: flinkv1beta1.MustParseQuantity("512Mi"),
+							corev1.ResourceMemory: testingflinkdeployment.MustParseQuantity("512Mi"),
 						},
 						Limits: flinkv1beta1.ResourceList{
 							corev1.ResourceMemory: plusQty,
@@ -1314,12 +1317,12 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec", "jobManager", "resources"),
 					nil,
-					`resource limit memory (1e9): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes because Flink interprets "1e9" incompatibly or rejects it`,
+					`resource limit memory (1e9): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "1e9" incompatibly or rejects it`,
 				),
 				field.Invalid(
 					field.NewPath("spec", "taskManager", "resources"),
 					nil,
-					`resource limit memory (+1Gi): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes, got "+1Gi"`,
+					`resource limit memory (+1Gi): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi), got "+1Gi"`,
 				),
 			},
 		},
@@ -1365,12 +1368,12 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec", "jobManager", "resources"),
 					nil,
-					`resource request memory (2048m): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes because Flink interprets "2048m" incompatibly or rejects it`,
+					`resource request memory (2048m): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "2048m" incompatibly or rejects it`,
 				),
 				field.Invalid(
 					field.NewPath("spec", "taskManager", "resources"),
 					nil,
-					`resource request memory (2G): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes because Flink interprets "2G" incompatibly or rejects it`,
+					`resource request memory (2G): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) because Flink interprets "2G" incompatibly or rejects it`,
 				),
 			},
 		},
@@ -1701,7 +1704,7 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec"),
 					field.OmitValueType{},
-					`job-manager podSet: initContainer "init-a": unsupported imagePullPolicy "always": supported values: "Always", "Never", "IfNotPresent"`,
+					`job-manager podSet: initContainer "init-a": unsupported imagePullPolicy "always"`,
 				),
 			},
 		},
@@ -1777,7 +1780,7 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec"),
 					field.OmitValueType{},
-					`job-manager podSet: toleration[0]: tolerations[0].operator: Invalid value: "Equal": operator must be Exists when key is empty`,
+					`job-manager podSet: toleration[0]: invalid Equal toleration`,
 				),
 			},
 		},
@@ -1831,21 +1834,20 @@ func TestValidateCreate(t *testing.T) {
 				),
 			},
 		},
-		"rejects duplicate list-map volume keys after positional podTemplate merge": {
-			job: testingflinkdeployment.MakeFlinkDeployment("dup-merged-volumes", "ns").
+		"rejects non-prefix component tolerations when root tolerations are set": {
+			job: testingflinkdeployment.MakeFlinkDeployment("non-prefix-tolerations", "ns").
 				Queue("lq").
 				PodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "vol-a", EmptyDir: &corev1.EmptyDirVolumeSource{}},
-							{Name: "vol-b", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+						Tolerations: []corev1.Toleration{
+							{Key: "base", Operator: corev1.TolerationOpExists},
 						},
 					},
 				}).
 				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "vol-b", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+						Tolerations: []corev1.Toleration{
+							{Key: "other", Operator: corev1.TolerationOpExists},
 						},
 					},
 				}).
@@ -1854,7 +1856,7 @@ func TestValidateCreate(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec"),
 					field.OmitValueType{},
-					`task-manager podSet: duplicate volumes name "vol-b"`,
+					`task-manager podSet: component podTemplate.spec.tolerations must include spec.podTemplate.spec.tolerations as a prefix when both are specified`,
 				),
 			},
 		},
@@ -1916,6 +1918,8 @@ func extractFieldErrors(t *testing.T, err error) field.ErrorList {
 
 func TestValidateUpdate(t *testing.T) {
 	now := metav1.NewTime(time.Now())
+	stopJobCtx, _ := utiltesting.ContextWithLog(t)
+	features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, true)
 
 	baseSuspended := testingflinkdeployment.MakeFlinkDeployment("app", "ns").
 		Queue("lq").
@@ -1929,260 +1933,61 @@ func TestValidateUpdate(t *testing.T) {
 		Suspend(false).
 		Obj()
 
-	stopJobCtx, _ := utiltesting.ContextWithLog(t)
-	tasCtx := stopJobCtx
-	features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, true)
-
-	cpuPoolFlavor := utiltestingapi.MakeResourceFlavor("cpu-pool-flavor").
-		NodeLabel("pool", "cpu").
-		Obj()
-	baseSuspendedPodSets, err := fromObject(baseSuspended).PodSets(stopJobCtx, nil)
+	basePodSets, err := fromObject(baseSuspended).PodSets(stopJobCtx, nil)
 	if err != nil {
 		t.Fatalf("baseSuspended PodSets() error: %v", err)
 	}
-	baseAdmittedWl := utiltestingapi.MakeWorkload(
-		GetWorkloadNameForFlinkDeployment(baseSuspended.Name, baseSuspended.UID),
-		baseSuspended.Namespace,
-	).
-		Queue("lq").
-		PodSets(baseSuspendedPodSets...).
-		ControllerReference(gvk, baseSuspended.Name, string(baseSuspended.UID)).
-		ReserveQuotaAt(
-			utiltestingapi.MakeAdmission("cq").
-				PodSets(
-					utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "cpu-pool-flavor", "1").
-						Obj(),
-					utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "cpu-pool-flavor", "1").
-						Obj(),
-				).
-				Obj(),
-			now.Time,
-		).
-		AdmittedAt(true, now.Time).
-		Obj()
-	baseQueuedWl := utiltestingapi.MakeWorkload(
-		GetWorkloadNameForFlinkDeployment(baseSuspended.Name, baseSuspended.UID),
-		baseSuspended.Namespace,
-	).
-		Queue("lq").
-		PodSets(baseSuspendedPodSets...).
-		ControllerReference(gvk, baseSuspended.Name, string(baseSuspended.UID)).
-		Obj()
-	baseEvictedDrainingWl := baseAdmittedWl.DeepCopy()
-	baseEvictedDrainingWl.Status.Conditions = append(baseEvictedDrainingWl.Status.Conditions, metav1.Condition{
-		Type:               kueue.WorkloadEvicted,
-		Status:             metav1.ConditionTrue,
-		Reason:             kueue.WorkloadEvictedByPreemption,
-		LastTransitionTime: now,
-	})
-	baseEvictedDrainedWl := baseEvictedDrainingWl.DeepCopy()
-	workload.UnsetQuotaReservationWithCondition(baseEvictedDrainedWl, "Evicted", "Savepoint drain completed", now.Time)
-	workload.SyncAdmittedCondition(baseEvictedDrainedWl, now.Time)
-	baseQuotaReservedOnlyWl := utiltestingapi.MakeWorkload(
-		GetWorkloadNameForFlinkDeployment(baseSuspended.Name, baseSuspended.UID),
-		baseSuspended.Namespace,
-	).
-		Queue("lq").
-		PodSets(baseSuspendedPodSets...).
-		ControllerReference(gvk, baseSuspended.Name, string(baseSuspended.UID)).
-		ReserveQuotaAt(
-			utiltestingapi.MakeAdmission("cq").
-				PodSets(
-					utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "cpu-pool-flavor", "1").
-						Obj(),
-					utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "cpu-pool-flavor", "1").
-						Obj(),
-				).
-				Obj(),
-			now.Time,
-		).
-		AdmittedAt(false, now.Time).
-		Obj()
+	baseWl := utiltestingapi.MakeWorkload("wl-app", "ns").PodSets(basePodSets...).Obj()
+	admittedRunning := baseSuspended.DeepCopy()
+	if err := fromObject(admittedRunning).RunWithPodSetsInfo(stopJobCtx, nil, []podset.PodSetInfo{
+		{
+			Name:            jobManagerPodSetName,
+			Count:           1,
+			Labels:          map[string]string{kueueconstants.LocalQueueLabel: "lq", kueueconstants.PodSetLabel: string(jobManagerPodSetName)},
+			Annotations:     map[string]string{kueue.PodSetUnconstrainedTopologyAnnotation: "true"},
+			NodeSelector:    map[string]string{"pool": "cpu"},
+			Tolerations:     []corev1.Toleration{{Key: "spot", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.TopologySchedulingGate}},
+		},
+		{
+			Name:            taskManagerPodSetName,
+			Count:           1,
+			Labels:          map[string]string{kueueconstants.LocalQueueLabel: "lq", kueueconstants.PodSetLabel: string(taskManagerPodSetName)},
+			Annotations:     map[string]string{kueue.PodSetUnconstrainedTopologyAnnotation: "true"},
+			NodeSelector:    map[string]string{"pool": "cpu"},
+			Tolerations:     []corev1.Toleration{{Key: "spot", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.TopologySchedulingGate}},
+		},
+	}); err != nil {
+		t.Fatalf("RunWithPodSetsInfo(admittedRunning) error: %v", err)
+	}
+	stoppedFromAdmitted := admittedRunning.DeepCopy()
+	fromObject(stoppedFromAdmitted).Suspend()
+	fromObject(stoppedFromAdmitted).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(baseWl))
 
-	setupFlavorClient := utiltesting.NewClientBuilder().WithObjects(cpuPoolFlavor).Build()
-	baseAdmittedInfo, err := expectedAdmittedPodSetsInfo(stopJobCtx, setupFlavorClient, baseAdmittedWl)
-	if err != nil {
-		t.Fatalf("expectedAdmittedPodSetsInfo(baseAdmittedWl) error: %v", err)
-	}
-	baseAdmittedRunning := baseSuspended.DeepCopy()
-	if err := fromObject(baseAdmittedRunning).RunWithPodSetsInfo(stopJobCtx, setupFlavorClient, baseAdmittedInfo); err != nil {
-		t.Fatalf("RunWithPodSetsInfo(baseAdmittedRunning) error: %v", err)
-	}
-
-	preAdmissionTAS := testingflinkdeployment.MakeFlinkDeployment("app-tas", "ns").
-		Queue("lq").
-		UID("uid-app-tas").
-		Suspend(true).
-		PodTemplate(&corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				NodeSelector: map[string]string{"base-zone": "us-central1-a"},
-			},
-		}).
-		TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-			Annotations: map[string]string{
-				kueue.PodSetRequiredTopologyAnnotation: "cloud.provider.com/rack",
-			},
-			Spec: corev1.PodSpec{
-				Tolerations: []corev1.Toleration{
-					{Key: "user-gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-				},
-			},
-		}).
-		Obj()
-	preAdmissionTASPodSets, err := fromObject(preAdmissionTAS).PodSets(tasCtx, nil)
-	if err != nil {
-		t.Fatalf("preAdmissionTAS PodSets() error: %v", err)
-	}
-	tasOnDemandFlavor := utiltestingapi.MakeResourceFlavor("cpu-on-demand").
-		NodeLabel("flavor-pool", "cpu-on-demand").
-		TopologyName("default").
-		Obj()
-	tasSpotGPUFlavor := utiltestingapi.MakeResourceFlavor("gpu-h100").
-		NodeLabel("flavor-pool", "gpu-h100").
-		Toleration(corev1.Toleration{
-			Key:      "spot",
-			Operator: corev1.TolerationOpEqual,
-			Value:    "true",
-			Effect:   corev1.TaintEffectNoSchedule,
-		}).
-		TopologyName("default").
-		Obj()
-	sampleTASAssignment := tas.V1Beta2From(&tas.TopologyAssignment{
-		Levels:  []string{"cloud.provider.com/rack"},
-		Domains: []tas.TopologyDomainAssignment{{Count: 1, Values: []string{"r1"}}},
-	})
-	tasAdmittedWl := utiltestingapi.MakeWorkload(
-		GetWorkloadNameForFlinkDeployment(preAdmissionTAS.Name, preAdmissionTAS.UID),
-		preAdmissionTAS.Namespace,
-	).
-		Queue("lq").
-		Label(kueue.MultiKueueOriginLabel, "manager-cluster").
-		PodSets(preAdmissionTASPodSets...).
-		ControllerReference(gvk, preAdmissionTAS.Name, string(preAdmissionTAS.UID)).
-		ReserveQuotaAt(
-			utiltestingapi.MakeAdmission("cq").
-				PodSets(
-					utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "cpu-on-demand", "1").
-						TopologyAssignment(sampleTASAssignment).
-						Obj(),
-					utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).
-						Assignment(corev1.ResourceCPU, "gpu-h100", "1").
-						TopologyAssignment(sampleTASAssignment).
-						Obj(),
-				).
-				Obj(),
-			now.Time,
-		).
-		AdmissionChecks(kueue.AdmissionCheckState{
-			Name:  "prov-check",
-			State: kueue.CheckStateReady,
-			PodSetUpdates: []kueue.PodSetUpdate{
-				{
-					Name:        taskManagerPodSetName,
-					Annotations: map[string]string{"cluster-autoscaler.kubernetes.io/consume-provisioning-request": "pr-1"},
-				},
-			},
-		}).
-		AdmittedAt(true, now.Time).
-		Obj()
-	tasSetupClient := utiltesting.NewClientBuilder().WithObjects(tasOnDemandFlavor, tasSpotGPUFlavor).Build()
-	tasAdmittedInfo, err := expectedAdmittedPodSetsInfo(tasCtx, tasSetupClient, tasAdmittedWl)
-	if err != nil {
-		t.Fatalf("expectedAdmittedPodSetsInfo(tasAdmittedWl) error: %v", err)
-	}
-	admittedRunning := preAdmissionTAS.DeepCopy()
-	if err := fromObject(admittedRunning).RunWithPodSetsInfo(tasCtx, tasSetupClient, tasAdmittedInfo); err != nil {
-		t.Fatalf("RunWithPodSetsInfo() setup error: %v", err)
-	}
-	restoredAfterStopJob := admittedRunning.DeepCopy()
-	fromObject(restoredAfterStopJob).Suspend()
-	fromObject(restoredAfterStopJob).RestorePodSetsInfo(tasCtx, jobframework.GetPodSetsInfoFromWorkload(tasAdmittedWl))
-
-	baseWithEmptyPtrs := testingflinkdeployment.MakeFlinkDeployment("app-empty-ptrs", "ns").
+	// Root podTemplate with explicit empty pointer strings on gRPC probe, hostPath, ephemeral PVC, and dnsConfig.
+	emptyPtrsBase := testingflinkdeployment.MakeFlinkDeployment("app-empty-ptrs", "ns").
 		Queue("lq").
 		UID("uid-empty-ptrs").
-		PodTemplate(&corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				DNSConfig: &corev1.PodDNSConfig{
-					Options: []corev1.PodDNSConfigOption{
-						{Name: "ndots", Value: new("")},
-					},
-				},
-				Volumes: []corev1.Volume{
-					{
-						Name: "local-dir",
-						HostPath: &corev1.HostPathVolumeSource{
-							Path: "/tmp/flink",
-							Type: new(corev1.HostPathUnset),
-						},
-					},
-					{
-						Name: "ephemeral-vol",
-						Ephemeral: &corev1.EphemeralVolumeSource{
-							VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
-								Spec: corev1.PersistentVolumeClaimSpec{
-									StorageClassName: new(""),
-									DataSource: &corev1.TypedLocalObjectReference{
-										APIGroup: new(""),
-										Kind:     "PersistentVolumeClaim",
-										Name:     "seed-pvc",
-									},
-								},
-							},
-						},
-					},
-				},
-				Containers: []corev1.Container{
-					{
-						Name: flinkMainContainerName,
-						LivenessProbe: &corev1.Probe{
-							GRPC: &corev1.GRPCAction{
-								Port:    9090,
-								Service: new(""),
-							},
-						},
-					},
-				},
-			},
-		}).
+		Suspend(true).
 		Obj()
-	preEmptyPtrsPodSets, err := fromObject(baseWithEmptyPtrs).PodSets(stopJobCtx, nil)
-	if err != nil {
-		t.Fatalf("preEmptyPtrsPodSets error: %v", err)
+	if err := json.Unmarshal(
+		[]byte(
+			`{"spec":{"containers":[{"name":"flink-main-container","image":"flink:1.20","livenessProbe":{"grpc":{"port":9090,"service":""}}}],"dnsConfig":{"searches":[]},"volumes":[{"name":"hp","hostPath":{"path":"/tmp","type":""}},{"name":"eph","ephemeral":{"volumeClaimTemplate":{"spec":{"accessModes":["ReadWriteOnce"],"dataSource":{"apiGroup":"","kind":"PersistentVolumeClaim","name":"src"},"resources":{"requests":{"storage":"1Gi"}}}}}}]}}`,
+		),
+		&emptyPtrsBase.Spec.PodTemplate,
+	); err != nil {
+		t.Fatalf("unmarshal emptyPtrsBase podTemplate: %v", err)
 	}
-	emptyPtrsWl := utiltestingapi.MakeWorkload(
-		GetWorkloadNameForFlinkDeployment(baseWithEmptyPtrs.Name, baseWithEmptyPtrs.UID),
-		baseWithEmptyPtrs.Namespace,
-	).
-		Queue("lq").
-		PodSets(preEmptyPtrsPodSets...).
-		ControllerReference(gvk, baseWithEmptyPtrs.Name, string(baseWithEmptyPtrs.UID)).
-		Obj()
-	admittedEmptyPtrs := baseWithEmptyPtrs.DeepCopy()
+	emptyPtrsPodSets, err := fromObject(emptyPtrsBase).PodSets(stopJobCtx, nil)
+	if err != nil {
+		t.Fatalf("emptyPtrsBase PodSets() error: %v", err)
+	}
+	emptyPtrsWl := utiltestingapi.MakeWorkload("wl-empty-ptrs", "ns").PodSets(emptyPtrsPodSets...).Obj()
+	admittedEmptyPtrs := emptyPtrsBase.DeepCopy()
 	if err := fromObject(admittedEmptyPtrs).RunWithPodSetsInfo(stopJobCtx, nil, []podset.PodSetInfo{
-		{
-			Name:  jobManagerPodSetName,
-			Count: 1,
-			Labels: map[string]string{
-				kueueconstants.LocalQueueLabel: "lq",
-				kueueconstants.PodSetLabel:     string(jobManagerPodSetName),
-			},
-			NodeSelector: map[string]string{"flavor": "on-demand"},
-		},
-		{
-			Name:  taskManagerPodSetName,
-			Count: 1,
-			Labels: map[string]string{
-				kueueconstants.LocalQueueLabel: "lq",
-				kueueconstants.PodSetLabel:     string(taskManagerPodSetName),
-			},
-			NodeSelector: map[string]string{"flavor": "on-demand"},
-		},
+		{Name: jobManagerPodSetName, Count: 1, NodeSelector: map[string]string{"flavor": "on-demand"}},
+		{Name: taskManagerPodSetName, Count: 1, NodeSelector: map[string]string{"flavor": "on-demand"}},
 	}); err != nil {
 		t.Fatalf("RunWithPodSetsInfo(admittedEmptyPtrs) error: %v", err)
 	}
@@ -2190,10 +1995,7 @@ func TestValidateUpdate(t *testing.T) {
 	fromObject(evictedEmptyPtrs).Suspend()
 	fromObject(evictedEmptyPtrs).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(emptyPtrsWl))
 
-	// Simulate EquivalentToWorkload overlay drift: Workload was created from initialDriftedBase,
-	// then the user updated Labels, Annotations, NodeSelector, and SchedulingGates while still
-	// suspended (keeping EquivalentToWorkload == true), then Kueue admitted the job via
-	// RunWithPodSetsInfo, and later JobReconciler.stopJob restores wl.Spec.PodSets.
+	// Simulate EquivalentToWorkload overlay drift while suspended followed by RunWithPodSetsInfo and stopJob restore.
 	initialDriftedBase := testingflinkdeployment.MakeFlinkDeployment("app-drifted", "ns").
 		Queue("lq").
 		UID("uid-app-drifted").
@@ -2222,25 +2024,9 @@ func TestValidateUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initialDriftedPodSets error: %v", err)
 	}
-	driftedControlledWorkload := utiltestingapi.MakeWorkload("wl-app-drifted", "ns").
-		PodSets(initialDriftedPodSets...).
-		ControllerReference(gvk, initialDriftedBase.Name, string(initialDriftedBase.UID)).
-		Obj()
-	driftedFinishedWorkload := driftedControlledWorkload.DeepCopy()
-	driftedFinishedWorkload.Name = "wl-app-drifted-finished"
-	driftedFinishedWorkload.Status.Conditions = []metav1.Condition{
-		{
-			Type:   kueue.WorkloadFinished,
-			Status: metav1.ConditionTrue,
-			Reason: kueue.WorkloadFinishedReasonSucceeded,
-		},
-	}
-	driftedWrongOwnerWorkload := driftedControlledWorkload.DeepCopy()
-	driftedWrongOwnerWorkload.Name = "wl-app-drifted-other-uid"
-	driftedWrongOwnerWorkload.OwnerReferences[0].UID = "uid-different"
-
+	driftedWl := utiltestingapi.MakeWorkload("wl-app-drifted", "ns").PodSets(initialDriftedPodSets...).Obj()
 	editedWhileSuspended := initialDriftedBase.DeepCopy()
-	editedWhileSuspended.Spec.JobManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{
+	editedWhileSuspended.Spec.JobManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 		Labels:      map[string]string{"env": "prod"},
 		Annotations: map[string]string{"owner": "team-b"},
 		Spec: corev1.PodSpec{
@@ -2251,43 +2037,100 @@ func TestValidateUpdate(t *testing.T) {
 				{Name: "example.com/new-gate"},
 			},
 		},
-	}
-	editedWhileSuspended.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{
+	})
+	editedWhileSuspended.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 		Labels:      map[string]string{"env": "prod"},
 		Annotations: map[string]string{"owner": "team-b"},
 		Spec: corev1.PodSpec{
 			NodeSelector: map[string]string{"tier": "new-tm"},
 		},
-	}
+	})
 	driftedRunning := editedWhileSuspended.DeepCopy()
 	if err := fromObject(driftedRunning).RunWithPodSetsInfo(stopJobCtx, nil, []podset.PodSetInfo{
-		{
-			Name:         jobManagerPodSetName,
-			Count:        1,
-			Labels:       map[string]string{kueueconstants.LocalQueueLabel: "lq"},
-			NodeSelector: map[string]string{"flavor-pool": "cpu-spot"},
-		},
-		{
-			Name:         taskManagerPodSetName,
-			Count:        1,
-			Labels:       map[string]string{kueueconstants.LocalQueueLabel: "lq"},
-			NodeSelector: map[string]string{"flavor-pool": "gpu-spot"},
-		},
+		{Name: jobManagerPodSetName, Count: 1, Labels: map[string]string{kueueconstants.LocalQueueLabel: "lq"}, NodeSelector: map[string]string{"flavor-pool": "cpu-spot"}},
+		{Name: taskManagerPodSetName, Count: 1, Labels: map[string]string{kueueconstants.LocalQueueLabel: "lq"}, NodeSelector: map[string]string{"flavor-pool": "gpu-spot"}},
 	}); err != nil {
 		t.Fatalf("RunWithPodSetsInfo(driftedRunning) error: %v", err)
 	}
-	driftedStoppedFromWorkload := driftedRunning.DeepCopy()
-	fromObject(driftedStoppedFromWorkload).Suspend()
-	fromObject(driftedStoppedFromWorkload).RestorePodSetsInfo(
-		stopJobCtx,
-		jobframework.GetPodSetsInfoFromWorkload(driftedControlledWorkload),
-	)
-	if diff := cmp.Diff(
-		[]corev1.PodSchedulingGate{{Name: "example.com/kept-gate"}},
-		driftedStoppedFromWorkload.Spec.JobManager.PodTemplate.Spec.SchedulingGates,
-	); diff != "" {
-		t.Fatalf("driftedStoppedFromWorkload JobManager SchedulingGates mismatch (-want,+got):\n%s", diff)
+	driftedStopped := driftedRunning.DeepCopy()
+	fromObject(driftedStopped).Suspend()
+	fromObject(driftedStopped).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(driftedWl))
+
+	// TAS slice-size fixture shrunk out-of-band via /scale subresource before Stop().
+	tasSliceSuspended := testingflinkdeployment.MakeFlinkDeployment("app-tas-slice", "ns").
+		Queue("lq").
+		UID("uid-tas-slice").
+		Suspend(true).
+		TaskManagerReplicas(4).
+		TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+			Annotations: map[string]string{
+				kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+				kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+				kueue.PodSetSliceSizeAnnotation:             "4",
+			},
+		}).
+		Obj()
+	tasSlicePodSets, err := fromObject(tasSliceSuspended).PodSets(stopJobCtx, nil)
+	if err != nil {
+		t.Fatalf("tasSliceSuspended PodSets() error: %v", err)
 	}
+	tasSliceWl := utiltestingapi.MakeWorkload("wl-tas-slice", "ns").PodSets(tasSlicePodSets...).Obj()
+	tasSliceRunning := tasSliceSuspended.DeepCopy()
+	if err := fromObject(tasSliceRunning).RunWithPodSetsInfo(stopJobCtx, nil, []podset.PodSetInfo{
+		{Name: jobManagerPodSetName, Count: 1, NodeSelector: map[string]string{"flavor": "cpu"}},
+		{Name: taskManagerPodSetName, Count: 4, NodeSelector: map[string]string{"flavor": "gpu"}, SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.TopologySchedulingGate}}},
+	}); err != nil {
+		t.Fatalf("RunWithPodSetsInfo(tasSliceRunning) error: %v", err)
+	}
+	tasShrunkRunning := tasSliceRunning.DeepCopy()
+	tasShrunkRunning.Spec.TaskManager.Replicas = new(int64(2))
+	tasShrunkStopped := tasShrunkRunning.DeepCopy()
+	fromObject(tasShrunkStopped).Suspend()
+	fromObject(tasShrunkStopped).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(tasSliceWl))
+
+	// HA TAS PodSet-grouped fixture scaled out-of-band to 0 or 4 via /scale subresource before Stop().
+	tasGroupAnnotations := map[string]string{
+		kueue.PodSetGroupName:                  "grp",
+		kueue.PodSetRequiredTopologyAnnotation: "cloud.provider.com/rack",
+	}
+	tasGroupSuspended := testingflinkdeployment.MakeFlinkDeployment("app-tas-group", "ns").
+		Queue("lq").
+		UID("uid-tas-group").
+		Suspend(true).
+		JobManagerReplicas(2).
+		TaskManagerReplicas(1).
+		JobManagerPodTemplate(&corev1.PodTemplateSpec{Annotations: tasGroupAnnotations}).
+		TaskManagerPodTemplate(&corev1.PodTemplateSpec{Annotations: tasGroupAnnotations}).
+		Obj()
+	tasGroupPodSets, err := fromObject(tasGroupSuspended).PodSets(stopJobCtx, nil)
+	if err != nil {
+		t.Fatalf("tasGroupSuspended PodSets() error: %v", err)
+	}
+	tasGroupWl := utiltestingapi.MakeWorkload("wl-tas-group", "ns").PodSets(tasGroupPodSets...).Obj()
+	tasGroupRunning := tasGroupSuspended.DeepCopy()
+	if err := fromObject(tasGroupRunning).RunWithPodSetsInfo(stopJobCtx, nil, []podset.PodSetInfo{
+		{Name: jobManagerPodSetName, Count: 2, NodeSelector: map[string]string{"flavor": "cpu"}, SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.TopologySchedulingGate}}},
+		{Name: taskManagerPodSetName, Count: 1, NodeSelector: map[string]string{"flavor": "gpu"}, SchedulingGates: []corev1.PodSchedulingGate{{Name: kueue.TopologySchedulingGate}}},
+	}); err != nil {
+		t.Fatalf("RunWithPodSetsInfo(tasGroupRunning) error: %v", err)
+	}
+	tasGroupScaledZeroRunning := tasGroupRunning.DeepCopy()
+	tasGroupScaledZeroRunning.Spec.TaskManager.Replicas = new(int64(0))
+	tasGroupScaledZeroStopped := tasGroupScaledZeroRunning.DeepCopy()
+	fromObject(tasGroupScaledZeroStopped).Suspend()
+	fromObject(tasGroupScaledZeroStopped).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(tasGroupWl))
+
+	tasGroupScaledFourRunning := tasGroupRunning.DeepCopy()
+	tasGroupScaledFourRunning.Spec.TaskManager.Replicas = new(int64(4))
+	tasGroupScaledFourStopped := tasGroupScaledFourRunning.DeepCopy()
+	fromObject(tasGroupScaledFourStopped).Suspend()
+	fromObject(tasGroupScaledFourStopped).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(tasGroupWl))
+
+	scaledToZeroRunning := admittedRunning.DeepCopy()
+	scaledToZeroRunning.Spec.TaskManager.Replicas = new(int64(0))
+	scaledToZeroStopped := scaledToZeroRunning.DeepCopy()
+	fromObject(scaledToZeroStopped).Suspend()
+	fromObject(scaledToZeroStopped).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(baseWl))
 
 	ancestorParent := testingflinkdeployment.MakeFlinkDeployment("parent-app", "ns").
 		Queue("parent-lq").
@@ -2301,17 +2144,18 @@ func TestValidateUpdate(t *testing.T) {
 			Suspend(state == flinkv1beta1.JobStateSuspended).
 			TaskManagerReplicas(tmReplicas).
 			Obj()
-		child.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-				Kind:       "FlinkDeployment",
-				Name:       ancestorParent.Name,
-				UID:        ancestorParent.UID,
-				Controller: new(true),
-			},
-		}
+		child.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
+			Kind:       "FlinkDeployment",
+			Name:       ancestorParent.Name,
+			UID:        ancestorParent.UID,
+			Controller: new(true),
+		}}
 		return child
 	}
+
+	immutableNotSuspendedMsg := fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg)
+	immutableDeletingMsg := fmt.Sprintf("%s when FlinkDeployment is being deleted", apivalidation.FieldImmutableErrorMsg)
 
 	testCases := map[string]struct {
 		oldJob                     *flinkv1beta1.FlinkDeployment
@@ -2321,35 +2165,616 @@ func TestValidateUpdate(t *testing.T) {
 		disableSkipAncestorCheck   bool
 		manageJobsWithoutQueueName bool
 		enableTAS                  bool
+		enableTASTopologySpreading bool
 		enableWorkloadLevelWFPR    bool
 		maxTimeoutOnWorkload       *metav1.Duration
 		defaultQueue               *kueue.LocalQueue
-		flavors                    []*kueue.ResourceFlavor
-		workloads                  []*kueue.Workload
 		wantNonFieldErr            error
 		wantErrs                   field.ErrorList
 	}{
-		"rejects spec.mode change while running even when derived PodSets are unchanged": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ImagePullPolicy(corev1.PullIfNotPresent).
-				ServiceAccount("flink").
-				Suspend(false).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ImagePullPolicy(corev1.PullIfNotPresent).
-				ServiceAccount("flink").
-				Suspend(false).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
+		"skips unmanaged Session FlinkDeployment update": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged", "ns").SessionCluster().Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged", "ns").SessionCluster().TaskManagerReplicas(5).Obj(),
+		},
+		"skips unmanaged Application FlinkDeployment update with Flink MemorySize 2g in component resources": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"unmanaged-app","namespace":"ns"},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"running"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"2g"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"2g"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"unmanaged-app","namespace":"ns"},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":4,"state":"running"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"2g"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"4g"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+		},
+		"allows a pre-existing labeled Session cluster to drop queue-name even with a default LocalQueue in the namespace": {
+			oldJob:       testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").SessionCluster().Obj(),
+			newJob:       testingflinkdeployment.MakeFlinkDeployment("session", "ns").SessionCluster().Obj(),
+			defaultQueue: utiltestingapi.MakeLocalQueue("default", "ns").Obj(),
+		},
+		"allows a pre-existing labeled Session cluster to drop queue-name under manageJobsWithoutQueueName=true": {
+			oldJob:                     testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").SessionCluster().Obj(),
+			newJob:                     testingflinkdeployment.MakeFlinkDeployment("session", "ns").SessionCluster().Obj(),
+			manageJobsWithoutQueueName: true,
+		},
+		"rejects spec changes on a pre-existing labeled Session cluster that keeps queue-name": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").SessionCluster().Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").SessionCluster().TaskManagerReplicas(4).Obj(),
+			wantErrs: field.ErrorList{
+				field.Required(field.NewPath("spec", "job"), "only Application mode (spec.job != nil) is supported for a Kueue-managed FlinkDeployment"),
+			},
+		},
+		"rejects adding queue-name to an existing Session cluster": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").SessionCluster().Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").SessionCluster().Obj(),
+			wantErrs: field.ErrorList{
+				field.Required(field.NewPath("spec", "job"), "only Application mode (spec.job != nil) is supported for a Kueue-managed FlinkDeployment"),
+			},
+		},
+		"rejects Application -> Session transition while running under manageJobsWithoutQueueName=true": {
+			oldJob:                     testingflinkdeployment.MakeFlinkDeployment("app", "ns").Suspend(false).Obj(),
+			newJob:                     testingflinkdeployment.MakeFlinkDeployment("app", "ns").SessionCluster().Obj(),
+			manageJobsWithoutQueueName: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
+			},
+		},
+		"rejects Application -> Session transition while suspended keeping queue-name": {
+			oldJob: baseSuspended,
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").Queue("lq").UID("uid-app").SessionCluster().Obj(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
+			},
+		},
+		"rejects Application -> Session transition while suspended and simultaneously removing queue-name": {
+			oldJob: baseSuspended,
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").UID("uid-app").SessionCluster().Obj(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
+			},
+		},
+		"rejects Session -> Application transition under manageJobsWithoutQueueName=true": {
+			oldJob:                     testingflinkdeployment.MakeFlinkDeployment("session", "ns").SessionCluster().Obj(),
+			newJob:                     testingflinkdeployment.MakeFlinkDeployment("session", "ns").Suspend(true).Obj(),
+			manageJobsWithoutQueueName: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
+			},
+		},
+		"rejects Session -> Application transition when adding queue-name": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").SessionCluster().Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").Queue("lq").Suspend(true).Obj(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
+			},
+		},
+		"allows finalizer removal on terminating top-level FlinkDeployment with pre-existing invalid spec": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.DeletionTimestamp = &now
+				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.DeletionTimestamp = &now
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+		},
+		"allows finalizer removal on terminating pre-existing queue-labeled Session cluster": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := testingflinkdeployment.MakeFlinkDeployment("session-del", "ns").Queue("lq").SessionCluster().Obj()
+				cp.DeletionTimestamp = &now
+				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := testingflinkdeployment.MakeFlinkDeployment("session-del", "ns").Queue("lq").SessionCluster().Obj()
+				cp.DeletionTimestamp = &now
+				return cp
+			}(),
+		},
+		"allows finalizer removal on terminating child FlinkDeployment with missing owner when SkipAncestorCheckForDeletedWorkloads is enabled": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1)
+				cp.DeletionTimestamp = &now
+				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1)
+				cp.DeletionTimestamp = &now
+				return cp
+			}(),
+		},
+		"returns ErrWorkloadOwnerNotFound on terminating child FlinkDeployment with missing owner when SkipAncestorCheckForDeletedWorkloads is disabled": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1)
+				cp.DeletionTimestamp = &now
+				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1)
+				cp.DeletionTimestamp = &now
+				return cp
+			}(),
+			disableSkipAncestorCheck: true,
+			wantNonFieldErr:          jobframework.ErrWorkloadOwnerNotFound,
+		},
+		"rejects spec and label mutations on terminating FlinkDeployment": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.DeletionTimestamp = &now
+				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.DeletionTimestamp = &now
+				cp.Labels[constants.QueueLabel] = "other-lq"
+				cp.Spec.TaskManager.Replicas = new(int64(4))
+				return cp
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "other-lq", apivalidation.FieldImmutableErrorMsg),
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, immutableDeletingMsg),
+			},
+		},
+		"allows standalone spec.job.state=suspended patch on running FlinkDeployment": {
+			oldJob: baseRunning,
+			newJob: baseSuspended,
+		},
+		"allows pure suspension of a pre-existing invalid running FlinkDeployment": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+		},
+		"rejects dropping queue-name during suspension of a pre-existing invalid running FlinkDeployment": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				delete(cp.Labels, constants.QueueLabel)
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
+			},
+		},
+		"allows Kueue stopJob transition running -> suspended with RestorePodSetsInfo removing injected flavor placement and implicit TAS": {
+			oldJob:    admittedRunning,
+			newJob:    stoppedFromAdmitted,
+			enableTAS: true,
+		},
+		"allows stopJob suspension when running FlinkDeployment was scaled to 0 via /scale subresource": {
+			oldJob:    scaledToZeroRunning,
+			newJob:    scaledToZeroStopped,
+			enableTAS: true,
+		},
+		"allows stopJob suspension when running TAS FlinkDeployment was scaled below podset-slice-size via /scale": {
+			oldJob:    tasShrunkRunning,
+			newJob:    tasShrunkStopped,
+			enableTAS: true,
+		},
+		"allows stopJob suspension when running HA TAS-grouped FlinkDeployment was scaled to 0 via /scale": {
+			oldJob:    tasGroupScaledZeroRunning,
+			newJob:    tasGroupScaledZeroStopped,
+			enableTAS: true,
+		},
+		"allows stopJob suspension when running HA TAS-grouped FlinkDeployment was scaled to 4 via /scale": {
+			oldJob:    tasGroupScaledFourRunning,
+			newJob:    tasGroupScaledFourStopped,
+			enableTAS: true,
+		},
+		"allows repairing TaskManagerReplicas from 4 back to 1 on suspended HA TAS-grouped FlinkDeployment": {
+			oldJob: tasGroupScaledFourStopped,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := tasGroupScaledFourStopped.DeepCopy()
+				cp.Spec.TaskManager.Replicas = new(int64(1))
+				return cp
+			}(),
+			enableTAS: true,
+		},
+		"rejects changing TaskManagerReplicas on suspended HA TAS-grouped FlinkDeployment to another invalid group count": {
+			oldJob: tasGroupScaledFourStopped,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := tasGroupScaledFourStopped.DeepCopy()
+				cp.Spec.TaskManager.Replicas = new(int64(3))
+				return cp
+			}(),
+			enableTAS: true,
 			wantErrs: field.ErrorList{
 				field.Invalid(
-					field.NewPath("spec", "mode"),
-					flinkv1beta1.KubernetesDeploymentModeStandalone,
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
+					field.NewPath("spec", "jobManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 3 replica(s) in the group",
+				),
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 3 replica(s) in the group",
+				),
+			},
+		},
+		"rejects changing podset-group-name on suspended HA TAS-grouped FlinkDeployment while counts remain invalid": {
+			oldJob: tasGroupScaledFourStopped,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := tasGroupScaledFourStopped.DeepCopy()
+				cp.Spec.JobManager.PodTemplate.Annotations[kueue.PodSetGroupName] = "grp-2"
+				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetGroupName] = "grp-2"
+				return cp
+			}(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp-2",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 4 replica(s) in the group",
+				),
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp-2",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 4 replica(s) in the group",
+				),
+			},
+		},
+		"rejects mismatched podset-topology-spreading edit on suspended HA TAS-grouped FlinkDeployment while counts remain invalid": {
+			oldJob: tasGroupScaledFourStopped,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := tasGroupScaledFourStopped.DeepCopy()
+				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetTopologySpreadingAnnotation] =
+					`{"workloadLabelSelectors":[{"key":"app","operator":"In","values":["main"]}],"rules":[{"topologyKey":"cloud.provider.com/rack","maxShareAllowingPlacement":"0.5"}]}`
+				return cp
+			}(),
+			enableTAS:                  true,
+			enableTASTopologySpreading: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 4 replica(s) in the group",
+				),
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetGroupName),
+					"grp",
+					"can only define groups where at least one pod set has only 1 replica, got: 2 replica(s) and 4 replica(s) in the group",
+				),
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "podTemplate", "metadata", "annotations"),
+					field.OmitValueType{},
+					"must specify the same 'kueue.x-k8s.io/podset-topology-spreading' annotation as 'spec.taskManager.podTemplate.metadata.annotations' in group 'grp', or neither pod set may specify it",
+				),
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations"),
+					field.OmitValueType{},
+					"must specify the same 'kueue.x-k8s.io/podset-topology-spreading' annotation as 'spec.jobManager.podTemplate.metadata.annotations' in group 'grp', or neither pod set may specify it",
+				),
+			},
+		},
+		"rejects adding out-of-bounds podset-slice-size while suspended when Replicas is unchanged": {
+			oldJob: baseSuspended,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				})
+				return cp
+			}(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceSizeAnnotation),
+					"4",
+					"must not be greater than pod set count 1",
+				),
+			},
+		},
+		"rejects increasing podset-slice-size above count while suspended when Replicas is unchanged": {
+			oldJob: tasSliceSuspended,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := tasSliceSuspended.DeepCopy()
+				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetSliceSizeAnnotation] = "8"
+				return cp
+			}(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceSizeAnnotation),
+					"8",
+					"must not be greater than pod set count 4",
+				),
+			},
+		},
+		"rejects non-divisible multi-layer podset-slice-required-topology-constraints while suspended when Replicas is unchanged": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-ml", "ns").
+				Queue("lq").
+				Suspend(true).
+				TaskManagerReplicas(6).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-ml", "ns").
+				Queue("lq").
+				Suspend(true).
+				TaskManagerReplicas(6).
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:                 "cloud.provider.com/block",
+						kueue.PodSetSliceRequiredTopologyConstraintsAnnotation: `[{"topology":"cloud.provider.com/rack","size":4},{"topology":"kubernetes.io/hostname","size":2}]`,
+					},
+				}).
+				Obj(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
+					int32(4),
+					"must evenly divide pod set count 6 when more than one layer is specified",
+				),
+			},
+		},
+		"rejects shrinking job.parallelism below podset-slice-size while suspended when taskManager.replicas is nil": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-par", "ns").
+				Queue("lq").
+				Suspend(true).
+				Parallelism(8).
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				}).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-par", "ns").
+				Queue("lq").
+				Suspend(true).
+				Parallelism(2).
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				}).
+				Obj(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceSizeAnnotation),
+					"4",
+					"must not be greater than pod set count 2",
+				),
+			},
+		},
+		"rejects raising taskmanager.numberOfTaskSlots when derived TaskManager count shrinks below podset-slice-size": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-slots", "ns").
+				Queue("lq").
+				Suspend(true).
+				Parallelism(8).
+				FlinkConfig(flinkConfigNumberOfTaskSlots, "1").
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				}).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app-tas-slots", "ns").
+				Queue("lq").
+				Suspend(true).
+				Parallelism(8).
+				FlinkConfig(flinkConfigNumberOfTaskSlots, "4").
+				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				}).
+				Obj(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceSizeAnnotation),
+					"4",
+					"must not be greater than pod set count 2",
+				),
+			},
+		},
+		"rejects non-pure running -> suspended update that injects out-of-bounds podset-slice-size": {
+			oldJob: baseRunning,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Annotations: map[string]string{
+						kueue.PodSetRequiredTopologyAnnotation:      "cloud.provider.com/rack",
+						kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.provider.com/rack",
+						kueue.PodSetSliceSizeAnnotation:             "4",
+					},
+				})
+				return cp
+			}(),
+			enableTAS: true,
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "taskManager", "podTemplate", "metadata", "annotations").Key(kueue.PodSetSliceSizeAnnotation),
+					"4",
+					"must not be greater than pod set count 1",
+				),
+			},
+		},
+		"rejects onboarding an unmanaged suspended FlinkDeployment with taskManager.replicas=0": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-zero", "ns").
+				Suspend(true).
+				TaskManagerReplicas(0).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-zero", "ns").
+				Queue("lq").
+				Suspend(true).
+				TaskManagerReplicas(0).
+				Obj(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "taskManager", "replicas"), int64(0), "must be greater than or equal to 1"),
+			},
+		},
+		"allows single-step onboarding of an unmanaged running FlinkDeployment by suspending and adding queue-name and priority-class": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-running", "ns").
+				Suspend(false).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-running", "ns").
+				Queue("lq").
+				Label(constants.WorkloadPriorityClassLabel, "high-priority").
+				Suspend(true).
+				Obj(),
+		},
+		"allows Kueue eviction when root podTemplate has explicit empty pointer strings on gRPC probe, hostPath, ephemeral PVC, and dnsConfig": {
+			oldJob: admittedEmptyPtrs,
+			newJob: evictedEmptyPtrs,
+		},
+		"allows JobReconciler.stopJob running -> suspended restore when Workload overlay fields drifted while suspended": {
+			oldJob: driftedRunning,
+			newJob: driftedStopped,
+		},
+		"rejects simultaneous spec.job.state=suspended and stripping queue-name on running FlinkDeployment": {
+			oldJob: baseRunning,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				delete(cp.Labels, constants.QueueLabel)
+				return cp
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
+			},
+		},
+		"rejects simultaneous spec.job.state=suspended and changing queue-name on running FlinkDeployment": {
+			oldJob: baseRunning,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Labels[constants.QueueLabel] = "other-lq"
+				return cp
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "other-lq", apivalidation.FieldImmutableErrorMsg),
+			},
+		},
+		"rejects simultaneous spec.job.state=suspended and adding WorkloadPriorityClass label on running FlinkDeployment": {
+			oldJob: baseRunning,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Labels[constants.WorkloadPriorityClassLabel] = "high-priority"
+				return cp
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.WorkloadPriorityClassLabel), "high-priority", "WorkloadPriorityClass cannot be added to a non-suspended workload"),
+			},
+		},
+		"rejects simultaneous spec.job.state=suspended and removing prebuilt-workload label on running FlinkDeployment": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseRunning.DeepCopy()
+				cp.Labels[constants.PrebuiltWorkloadLabel] = "prebuilt-wl"
+				return cp
+			}(),
+			newJob: baseSuspended,
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.PrebuiltWorkloadLabel), "", apivalidation.FieldImmutableErrorMsg),
+			},
+		},
+		"rejects running -> suspended transition that mutates component resources memory from 1536Mi to fractional 1.5Gi": {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"app","namespace":"ns","labels":{"kueue.x-k8s.io/queue-name":"lq"}},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"running"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"1536Mi"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"1536Mi"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"app","namespace":"ns","labels":{"kueue.x-k8s.io/queue-name":"lq"}},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"suspended"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"1.5Gi"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"1536Mi"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "resources"),
+					nil,
+					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)`,
+				),
+			},
+		},
+		`rejects running -> suspended transition that mutates component resources cpu from 1 to whitespace-padded " 1 "`: {
+			oldJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"app","namespace":"ns","labels":{"kueue.x-k8s.io/queue-name":"lq"}},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"running"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"1Gi"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"1Gi"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"app","namespace":"ns","labels":{"kueue.x-k8s.io/queue-name":"lq"}},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"suspended"},"jobManager":{"resources":{"requests":{"cpu":" 1 ","memory":"1Gi"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"1Gi"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				return &fd
+			}(),
+			wantErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec", "jobManager", "resources"),
+					nil,
+					`resource request cpu (" 1 ") must not contain whitespace`,
 				),
 			},
 		},
@@ -2366,857 +2791,41 @@ func TestValidateUpdate(t *testing.T) {
 				TaskManagerResource(new(1.0), "2048m", "").
 				Obj(),
 		},
-		"allows a pre-existing labeled Session cluster to drop queue-name even with a default LocalQueue in the namespace": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				Obj(),
-			defaultQueue: utiltestingapi.MakeLocalQueue("default", "ns").Obj(),
-		},
-		"skips unmanaged Session FlinkDeployment update": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged", "ns").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged", "ns").
-				SessionCluster().
-				TaskManagerReplicas(4).
-				Obj(),
-		},
-		"allows finalizer removal on deleting FlinkDeployment even with missing owner or invalid spec": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Spec.JobManager.Resource.Memory = ""
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Spec.JobManager.Resource.Memory = ""
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
-			manageJobsWithoutQueueName: true,
-		},
-		"allows Kueue admission transition suspended -> running with injected nodeSelector": {
-			oldJob:    baseSuspended,
-			newJob:    baseAdmittedRunning,
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-		},
-		"allows Kueue startJob suspended -> running transition with ResourceFlavor placement, toleration, TAS gate, MultiKueue label, and AdmissionCheck PodSetUpdate": {
-			oldJob:    preAdmissionTAS,
-			newJob:    admittedRunning,
-			enableTAS: true,
-			flavors:   []*kueue.ResourceFlavor{tasOnDemandFlavor, tasSpotGPUFlavor},
-			workloads: []*kueue.Workload{tasAdmittedWl},
-		},
-		"allows Kueue startJob re-unsuspending an implicit-TAS admitted FlinkDeployment after manual spec.job.state=suspended": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			newJob:    admittedRunning,
-			enableTAS: true,
-			flavors:   []*kueue.ResourceFlavor{tasOnDemandFlavor, tasSpotGPUFlavor},
-			workloads: []*kueue.Workload{tasAdmittedWl},
-		},
-		"rejects manual suspended -> running transition when no Workload exists": {
-			oldJob: baseSuspended,
-			newJob: baseRunning,
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects manual suspended -> running transition when owned Workload is queued and not yet admitted": {
-			oldJob:    baseSuspended,
-			newJob:    baseRunning,
-			workloads: []*kueue.Workload{baseQueuedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects manual suspended -> running transition when owned Workload is evicted and draining": {
-			oldJob:    baseSuspended,
-			newJob:    baseAdmittedRunning,
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseEvictedDrainingWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects manual suspended -> running transition when owned Workload is evicted and drained": {
-			oldJob:    baseSuspended,
-			newJob:    baseAdmittedRunning,
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseEvictedDrainedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects admitted suspended -> running transition with hijacked ResourceFlavor nodeSelector, extra taint toleration, or stripped TAS schedulingGate": {
-			oldJob: preAdmissionTAS,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.TaskManager.PodTemplate.Spec.NodeSelector["flavor-pool"] = "reserved-b200"
-				cp.Spec.TaskManager.PodTemplate.Spec.Tolerations = append(
-					cp.Spec.TaskManager.PodTemplate.Spec.Tolerations,
-					corev1.Toleration{Key: "reserved-b200", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-				)
-				cp.Spec.TaskManager.PodTemplate.Spec.SchedulingGates = nil
-				return cp
-			}(),
-			enableTAS: true,
-			flavors:   []*kueue.ResourceFlavor{tasOnDemandFlavor, tasSpotGPUFlavor},
-			workloads: []*kueue.Workload{tasAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects mutating role podTemplate tolerations or nodeSelector while suspended when owned Workload is already admitted": {
+		"allows scaling TaskManagerReplicas and updating podTemplate while suspended": {
 			oldJob: baseSuspended,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
 				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"pool": "reserved-h100"},
-						Tolerations: []corev1.Toleration{
-							{Key: "reserved-h100", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-						},
-					},
-				}
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s while Workload is admitted", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects stripping or changing queue-name while suspended when owned Workload is already admitted": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				delete(cp.Labels, constants.QueueLabel)
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects mutating max-exec-time-seconds label while suspended when owned Workload is already admitted": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "120"
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel), "120", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects changing queue-name, adding priority-class, or scaling replicas while suspended when owned Workload has QuotaReserved=True pending AdmissionCheck": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Labels[constants.QueueLabel] = "other-lq"
-				cp.Labels[constants.WorkloadPriorityClassLabel] = "high-prio"
 				cp.Spec.TaskManager.Replicas = new(int64(4))
+				cp.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{NodeSelector: map[string]string{"tier": "batch"}},
+				})
 				return cp
 			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseQuotaReservedOnlyWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "other-lq", apivalidation.FieldImmutableErrorMsg),
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.WorkloadPriorityClassLabel),
-					"high-prio",
-					"WorkloadPriorityClass cannot be added to a non-suspended workload",
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s while Workload has quota reserved", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
 		},
-		"rejects suspended -> running when oldObj PodSets failed validation prior to webhook enablement": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("legacy-invalid", "ns").
-				Queue("lq").
-				Suspend(true).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerResource(nil, "2048m", "").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("legacy-invalid", "ns").
-				Queue("lq").
-				Suspend(false).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects suspended -> running when oldObj drifted from admitted Workload via /scale subresource": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(8))
-				return cp
-			}(),
+		"allows fixing taskManager.replicas from 0 back to 2 while suspended": {
+			oldJob: scaledToZeroStopped,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(8))
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects mutating taskmanager.numberOfTaskSlots, merge-arrays-by-name, or spec.job.parallelism while running even when explicit replicas and CPU keep PodSets identical": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-slots", "ns").
-				Queue("lq").
-				Suspend(false).
-				Parallelism(4).
-				TaskManagerReplicas(2).
-				TaskManagerResource(new(2.0), "2048m", "").
-				FlinkConfig("taskmanager.numberOfTaskSlots", "4").
-				FlinkConfig("kubernetes.operator.pod-template.merge-arrays-by-name", "false").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app-slots", "ns").
-				Queue("lq").
-				Suspend(false).
-				Parallelism(8).
-				TaskManagerReplicas(2).
-				TaskManagerResource(new(2.0), "2048m", "").
-				FlinkConfig("taskmanager.numberOfTaskSlots", "1").
-				FlinkConfig("kubernetes.operator.pod-template.merge-arrays-by-name", "true").
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "job", "parallelism"),
-					int64(8),
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec", "flinkConfiguration").Key("taskmanager.numberOfTaskSlots"),
-					"1",
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec", "flinkConfiguration").Key("kubernetes.operator.pod-template.merge-arrays-by-name"),
-					"true",
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects stripping queue-name, mutating spec.image, or scaling replicas while suspended during savepoint eviction drain (Evicted=True, QuotaReserved=True)": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				delete(cp.Labels, constants.QueueLabel)
-				cp.Spec.Image = "flink:2.0"
-				cp.Spec.TaskManager.Replicas = new(int64(4))
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseEvictedDrainingWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-				field.Invalid(
-					field.NewPath("spec", "image"),
-					"flink:2.0",
-					fmt.Sprintf("%s while Workload has quota reserved", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s while Workload has quota reserved", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"allows mutating role podTemplate, scaling replicas, or detaching queue-name while suspended once evicted Workload releases quota (Evicted=True, QuotaReserved=False)": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				delete(cp.Labels, constants.QueueLabel)
-				cp.Spec.TaskManager.Replicas = new(int64(4))
-				cp.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"tenant-tier": "batch"},
-					},
-				}
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseEvictedDrainedWl},
-		},
-		"allows stopJob pure suspension when running FlinkDeployment was scaled to 0 via /scale subresource": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(0))
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(0))
-				fromObject(cp).Suspend()
-				fromObject(cp).RestorePodSetsInfo(stopJobCtx, jobframework.GetPodSetsInfoFromWorkload(baseAdmittedWl))
-				return cp
-			}(),
-			flavors:   []*kueue.ResourceFlavor{cpuPoolFlavor},
-			workloads: []*kueue.Workload{baseAdmittedWl},
-		},
-		"allows fixing taskManager.replicas from 0 back to 2 while suspended once non-matching Workload is gone": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(0))
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
+				cp := scaledToZeroStopped.DeepCopy()
 				cp.Spec.TaskManager.Replicas = new(int64(2))
 				return cp
 			}(),
-		},
-		"allows stopJob pure suspension when running TAS FlinkDeployment was scaled below podset-slice-size via /scale": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetSliceRequiredTopologyAnnotation] = "cloud.provider.com/rack"
-				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetSliceSizeAnnotation] = "4"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetSliceRequiredTopologyAnnotation] = "cloud.provider.com/rack"
-				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetSliceSizeAnnotation] = "4"
-				fromObject(cp).Suspend()
-				fromObject(cp).RestorePodSetsInfo(tasCtx, jobframework.GetPodSetsInfoFromWorkload(tasAdmittedWl))
-				return cp
-			}(),
-			enableTAS: true,
-			flavors:   []*kueue.ResourceFlavor{tasOnDemandFlavor, tasSpotGPUFlavor},
-			workloads: []*kueue.Workload{tasAdmittedWl},
-		},
-		"allows pure suspension of a pre-existing invalid running FlinkDeployment without Workload": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("legacy-running-missing-mem", "ns").
-				Queue("lq").
-				Suspend(false).
-				JobManagerResource(new(1.0), "", "").
-				TaskManagerResource(new(1.0), "1.5Gi", "").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("legacy-running-missing-mem", "ns").
-				Queue("lq").
-				Suspend(true).
-				JobManagerResource(new(1.0), "", "").
-				TaskManagerResource(new(1.0), "1.5Gi", "").
-				Obj(),
-		},
-		"rejects dropping queue-name during suspension of a pre-existing invalid running FlinkDeployment": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("legacy-running-missing-mem", "ns").
-				Queue("lq").
-				Suspend(false).
-				JobManagerResource(new(1.0), "", "").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("legacy-running-missing-mem", "ns").
-				Suspend(true).
-				JobManagerResource(new(1.0), "", "").
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"allows manual savepointTriggerNonce update while running": {
-			oldJob: baseRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.Spec.Job.SavepointTriggerNonce = new(int64(1))
-				return cp
-			}(),
-		},
-		"rejects scaling TaskManager replicas while running": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(false).
-				TaskManagerReplicas(4).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects changing queue-name while running": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("other-lq").
-				Suspend(false).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "other-lq", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects stripping queue-name while running": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Suspend(false).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"skips unmanaged Application FlinkDeployment update with Flink MemorySize 2g in component resources": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				var fd flinkv1beta1.FlinkDeployment
-				if err := json.Unmarshal(
-					[]byte(
-						`{"metadata":{"name":"unmanaged-2g","namespace":"ns"},"spec":{"image":"flink:1.20","jobManager":{"resources":{"requests":{"cpu":"1","memory":"2g"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"2g"}}},"job":{"jarURI":"local:///app.jar","parallelism":2,"state":"running"}}}`,
-					),
-					&fd,
-				); err != nil {
-					t.Fatalf("json.Unmarshal(oldJob) error: %v", err)
-				}
-				return &fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				var fd flinkv1beta1.FlinkDeployment
-				if err := json.Unmarshal(
-					[]byte(
-						`{"metadata":{"name":"unmanaged-2g","namespace":"ns"},"spec":{"image":"flink:1.20","jobManager":{"resources":{"requests":{"cpu":"1","memory":"4g"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"4g"}}},"job":{"jarURI":"local:///app.jar","parallelism":4,"state":"running"}}}`,
-					),
-					&fd,
-				); err != nil {
-					t.Fatalf("json.Unmarshal(newJob) error: %v", err)
-				}
-				return &fd
-			}(),
-		},
-		"allows Kueue stopJob transition running -> suspended with RestorePodSetsInfo removing injected flavor placement and implicit TAS": {
-			oldJob:    admittedRunning,
-			newJob:    restoredAfterStopJob,
-			enableTAS: true,
-			workloads: []*kueue.Workload{tasAdmittedWl},
-		},
-		"allows standalone spec.job.state=suspended patch on running FlinkDeployment": {
-			oldJob: admittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-		},
-		"rejects single-patch running -> suspended transition that wipes user nodeSelector or schedulingGates": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				return testingflinkdeployment.MakeFlinkDeployment("app-tenant-overlay", "ns").
-					Queue("lq").
-					UID("uid-tenant-overlay").
-					Suspend(false).
-					TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							NodeSelector:    map[string]string{"tenant": "team-a", "flavor": "spot"},
-							SchedulingGates: []corev1.PodSchedulingGate{{Name: "example.com/custom-gate"}},
-						},
-					}).
-					Obj()
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				return testingflinkdeployment.MakeFlinkDeployment("app-tenant-overlay", "ns").
-					Queue("lq").
-					UID("uid-tenant-overlay").
-					Suspend(true).
-					Obj()
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and TaskManagerReplicas mutation on running FlinkDeployment": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				UID("uid-app").
-				Suspend(true).
-				TaskManagerReplicas(4).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and spec.mode mutation on running FlinkDeployment": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ImagePullPolicy(corev1.PullIfNotPresent).
-				ServiceAccount("flink").
-				Suspend(false).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ImagePullPolicy(corev1.PullIfNotPresent).
-				ServiceAccount("flink").
-				Suspend(true).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "mode"),
-					flinkv1beta1.KubernetesDeploymentModeStandalone,
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and root spec.podTemplate mutation on running FlinkDeployment": {
-			oldJob: admittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Spec.PodTemplate.Spec.NodeSelector = map[string]string{"base-zone": "us-east1-b"}
-				return cp
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "podTemplate"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and stripping queue-name on running FlinkDeployment": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Suspend(true).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and changing queue-name on running FlinkDeployment": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("other-lq").
-				Suspend(true).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "other-lq", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and adding WorkloadPriorityClass label on running FlinkDeployment": {
-			oldJob: baseRunning,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				WorkloadPriorityClass("high-prio").
-				Suspend(true).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.WorkloadPriorityClassLabel),
-					"high-prio",
-					"WorkloadPriorityClass cannot be added to a non-suspended workload",
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and removing prebuilt-workload label on running FlinkDeployment": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Label(constants.PrebuiltWorkloadLabel, "prebuilt-wl").
-				Suspend(false).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(true).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.PrebuiltWorkloadLabel), "", apivalidation.FieldImmutableErrorMsg),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and removing explicit user TAS annotation on running FlinkDeployment": {
-			oldJob: admittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				delete(cp.Spec.TaskManager.PodTemplate.Annotations, kueue.PodSetRequiredTopologyAnnotation)
-				return cp
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous spec.job.state=suspended and adding role podTemplate nodeSelector on running FlinkDeployment": {
-			oldJob: admittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Spec.TaskManager.PodTemplate.Spec.NodeSelector["extra-key"] = "extra-val"
-				return cp
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects mutating top-level spec.image while running even when podTemplate flink-main-container specifies image": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(false).
-				Image("flink:1.20.0").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: flinkMainContainerName, Image: "flink:1.19-base"},
-						},
-					},
-				}).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(false).
-				Image("flink:1.20.1").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: flinkMainContainerName, Image: "flink:1.19-base"},
-						},
-					},
-				}).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "image"),
-					"flink:1.20.1",
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects clearing spec.serviceAccount, spec.image, or spec.imagePullPolicy while running even when podTemplate fallback keeps derived PodSets identical": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-top-level-immutable", "ns").
-				Queue("lq").
-				Suspend(false).
-				Image("flink:1.20").
-				ImagePullPolicy(corev1.PullIfNotPresent).
-				ServiceAccount("flink").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ServiceAccountName: "flink",
-						Containers: []corev1.Container{
-							{
-								Name:            flinkMainContainerName,
-								Image:           "flink:1.20",
-								ImagePullPolicy: corev1.PullIfNotPresent,
-							},
-						},
-					},
-				}).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app-top-level-immutable", "ns").
-				Queue("lq").
-				Suspend(false).
-				Image("").
-				ImagePullPolicy("").
-				ServiceAccount("").
-				PodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ServiceAccountName: "flink",
-						Containers: []corev1.Container{
-							{
-								Name:            flinkMainContainerName,
-								Image:           "flink:1.20",
-								ImagePullPolicy: corev1.PullIfNotPresent,
-							},
-						},
-					},
-				}).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "image"),
-					"",
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec", "imagePullPolicy"),
-					corev1.PullPolicy(""),
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec", "serviceAccount"),
-					"",
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects Application -> Session transition while running under manageJobsWithoutQueueName=true": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Suspend(false).
-				TaskManagerReplicas(1).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				SessionCluster().
-				TaskManagerReplicas(1).
-				Obj(),
-			manageJobsWithoutQueueName: true,
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
-			},
-		},
-		"rejects Application -> Session transition while suspended keeping queue-name": {
-			oldJob: baseSuspended,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
-			},
-		},
-		"rejects Application -> Session transition while suspended and simultaneously removing queue-name": {
-			oldJob: baseSuspended,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				SessionCluster().
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
-				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
-			},
-		},
-		"rejects Session -> Application transition under manageJobsWithoutQueueName=true": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				TaskManagerReplicas(1).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Suspend(false).
-				TaskManagerReplicas(1).
-				Obj(),
-			manageJobsWithoutQueueName: true,
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
-			},
-		},
-		"rejects Session -> Application transition when adding queue-name": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				Suspend(false).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "lq", apivalidation.FieldImmutableErrorMsg),
-				field.Invalid(field.NewPath("spec", "job"), field.OmitValueType{}, "cannot switch between Session and Application mode"),
-			},
-		},
-		"rejects adding queue-name to an existing Session cluster": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "lq", apivalidation.FieldImmutableErrorMsg),
-				field.Required(field.NewPath("spec", "job"), "only Application mode (spec.job != nil) is supported for a Kueue-managed FlinkDeployment"),
-			},
 		},
 		"allows detaching a suspended Application job from Kueue with a standalone-only spec": {
 			oldJob: baseSuspended,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Suspend(true).
-				FlinkConfig("job.autoscaler.enabled", "true").
-				FlinkConfig("kubernetes.taskmanager.cpu.limit-factor", "1.5").
-				Obj(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				delete(cp.Labels, constants.QueueLabel)
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
 		},
 		"rejects standalone-only spec changes while still managed and suspended": {
 			oldJob: baseSuspended,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(true).
-				FlinkConfig("job.autoscaler.enabled", "true").
-				Obj(),
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"job.autoscaler.enabled": "true"})
+				return cp
+			}(),
 			wantErrs: field.ErrorList{
 				field.Forbidden(
 					field.NewPath("spec", "flinkConfiguration").Key("job.autoscaler.enabled"),
@@ -3227,223 +2836,67 @@ func TestValidateUpdate(t *testing.T) {
 		"rejects fractional BinarySI memory literal decoded from JSON on update while suspended": {
 			oldJob: baseSuspended,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"2","memory":"1.5Gi"}}`), &cp.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(resources) error: %v", err)
+				var fd flinkv1beta1.FlinkDeployment
+				if err := json.Unmarshal(
+					[]byte(
+						`{"metadata":{"name":"app","namespace":"ns","uid":"uid-app","labels":{"kueue.x-k8s.io/queue-name":"lq"}},"spec":{"image":"flink:1.20","job":{"jarURI":"local:///opt/app.jar","parallelism":1,"state":"suspended"},"jobManager":{"resources":{"requests":{"cpu":"1","memory":"1Gi"}}},"taskManager":{"resources":{"requests":{"cpu":"1","memory":"1.5Gi"}}}}}`,
+					),
+					&fd,
+				); err != nil {
+					t.Fatalf("unmarshal: %v", err)
 				}
-				return cp
+				return &fd
 			}(),
 			wantErrs: field.ErrorList{
 				field.Invalid(
 					field.NewPath("spec", "taskManager", "resources"),
 					nil,
-					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes`,
+					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)`,
 				),
 			},
 		},
-		"allows a pre-existing labeled Session cluster to drop queue-name": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				TaskManagerReplicas(3).
-				Obj(),
-		},
-		"allows a pre-existing labeled Session cluster to drop queue-name under manageJobsWithoutQueueName=true": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				SessionCluster().
-				Obj(),
-			manageJobsWithoutQueueName: true,
-		},
-		"rejects spec changes on a pre-existing labeled Session cluster that keeps queue-name": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("session", "ns").
-				Queue("lq").
-				SessionCluster().
-				TaskManagerReplicas(3).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Required(field.NewPath("spec", "job"), "only Application mode (spec.job != nil) is supported for a Kueue-managed FlinkDeployment"),
-			},
-		},
-		"allows Kueue eviction when root podTemplate has explicit empty pointer strings on gRPC probe, hostPath, ephemeral PVC, and dnsConfig": {
-			oldJob:    admittedEmptyPtrs,
-			newJob:    evictedEmptyPtrs,
-			workloads: []*kueue.Workload{emptyPtrsWl},
-		},
-		"rejects simultaneous suspended -> running transition and scaling TaskManagerReplicas": {
+		"allows valid max-exec-time-seconds update while suspended": {
 			oldJob: baseSuspended,
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				Suspend(false).
-				TaskManagerReplicas(4).
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous suspended -> running transition and spec.mode mutation": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ServiceAccount("flink").
-				Suspend(true).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
-				Queue("lq").
-				ServiceAccount("flink").
-				Suspend(false).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "mode"),
-					flinkv1beta1.KubernetesDeploymentModeStandalone,
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects simultaneous suspended -> running transition and root spec.podTemplate mutation": {
-			oldJob: preAdmissionTAS,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := preAdmissionTAS.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateRunning
-				cp.Spec.PodTemplate.Spec.NodeSelector = map[string]string{"base-zone": "us-west1-a"}
+				cp := baseSuspended.DeepCopy()
+				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3600"
+				return cp
+			}(),
+		},
+		"rejects non-positive max-exec-time-seconds update while suspended": {
+			oldJob: baseSuspended,
+			newJob: func() *flinkv1beta1.FlinkDeployment {
+				cp := baseSuspended.DeepCopy()
+				cp.Labels[constants.MaxExecTimeSecondsLabel] = "0"
 				return cp
 			}(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "podTemplate"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel), 0, "should be greater than 0"),
 			},
 		},
-		"rejects simultaneous suspended -> running transition that modifies existing role nodeSelector or explicit TAS annotation": {
-			oldJob: preAdmissionTAS,
+		"allows Kueue admission transition suspended -> running with ResourceFlavor placement, toleration, and TAS gate": {
+			oldJob:    baseSuspended,
+			newJob:    admittedRunning,
+			enableTAS: true,
+		},
+		"rejects suspended -> running transition when newJob spec is invalid": {
+			oldJob: baseSuspended,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := preAdmissionTAS.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateRunning
-				cp.Spec.TaskManager.PodTemplate.Annotations[kueue.PodSetRequiredTopologyAnnotation] = "kubernetes.io/hostname"
+				cp := baseRunning.DeepCopy()
+				cp.Spec.Job.Parallelism = new(int64(0))
 				return cp
 			}(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec", "job", "parallelism"), int64(0), "must be greater than or equal to 1"),
 			},
 		},
-		"rejects simultaneous suspended -> running transition that drops existing role toleration": {
-			oldJob: preAdmissionTAS,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := preAdmissionTAS.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateRunning
-				cp.Spec.TaskManager.PodTemplate.Spec.Tolerations = nil
-				return cp
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"allows JobReconciler.stopJob running -> suspended restore when Workload overlay fields drifted while suspended": {
-			oldJob:    driftedRunning,
-			newJob:    driftedStoppedFromWorkload,
-			workloads: []*kueue.Workload{driftedControlledWorkload},
-		},
-		"rejects running -> suspended drifted overlay restore when Workload is already Finished": {
-			oldJob:    driftedRunning,
-			newJob:    driftedStoppedFromWorkload,
-			workloads: []*kueue.Workload{driftedFinishedWorkload},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects running -> suspended drifted overlay restore when Workload is owned by another UID": {
-			oldJob:    driftedRunning,
-			newJob:    driftedStoppedFromWorkload,
-			workloads: []*kueue.Workload{driftedWrongOwnerWorkload},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects running -> suspended drifted overlay restore when also scaling TaskManagerReplicas": {
-			oldJob: driftedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := driftedStoppedFromWorkload.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(4))
-				return cp
-			}(),
-			workloads: []*kueue.Workload{driftedControlledWorkload},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects live in-place scaling via flat and nested pipeline.jobvertex-parallelism-overrides.<vertexId> while running in native mode": {
+		"allows manual savepointTriggerNonce update while running": {
 			oldJob: baseRunning,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
 				cp := baseRunning.DeepCopy()
-				rawCfg := `{
-					"pipeline.jobvertex-parallelism-overrides.v1": "32",
-					"pipeline": {"jobvertex-parallelism-overrides": {"v2": "64"}}
-				}`
-				if err := json.Unmarshal([]byte(rawCfg), &cp.Spec.FlinkConfiguration); err != nil {
-					t.Fatalf("json.Unmarshal(rawCfg) error: %v", err)
-				}
+				cp.Spec.Job.SavepointTriggerNonce = new(int64(42))
 				return cp
 			}(),
-			wantErrs: field.ErrorList{
-				field.Forbidden(
-					field.NewPath("spec", "flinkConfiguration").Key("pipeline.jobvertex-parallelism-overrides.v1"),
-					"spec.mode must be standalone and spec.taskManager.replicas must be explicitly set when pipeline.jobvertex-parallelism-overrides.v1 is configured",
-				),
-				field.Forbidden(
-					field.NewPath("spec", "flinkConfiguration").Key("pipeline.jobvertex-parallelism-overrides.v2"),
-					"spec.mode must be standalone and spec.taskManager.replicas must be explicitly set when pipeline.jobvertex-parallelism-overrides.v2 is configured",
-				),
-			},
 		},
 		"allows updating pipeline.jobvertex-parallelism-overrides.<vertexId> while running in standalone mode with explicit taskManager.replicas": {
 			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-standalone", "ns").
@@ -3452,7 +2905,7 @@ func TestValidateUpdate(t *testing.T) {
 				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
 				TaskManagerReplicas(2).
 				TaskManagerResource(new(1.0), "2048m", "").
-				FlinkConfig("pipeline.jobvertex-parallelism-overrides.v1", "4").
+				FlinkConfig("pipeline.jobvertex-parallelism-overrides.v1", "2").
 				Obj(),
 			newJob: testingflinkdeployment.MakeFlinkDeployment("app-standalone", "ns").
 				Queue("lq").
@@ -3460,7 +2913,7 @@ func TestValidateUpdate(t *testing.T) {
 				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
 				TaskManagerReplicas(2).
 				TaskManagerResource(new(1.0), "2048m", "").
-				FlinkConfig("pipeline.jobvertex-parallelism-overrides.v1", "8").
+				FlinkConfig("pipeline.jobvertex-parallelism-overrides.v1", "4").
 				Obj(),
 		},
 		"allows adding flink-main-container imagePullPolicy in taskManager.podTemplate while running in standalone mode with omitted spec.imagePullPolicy": {
@@ -3479,1048 +2932,145 @@ func TestValidateUpdate(t *testing.T) {
 				TaskManagerResource(new(1.0), "2048m", "").
 				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:            flinkMainContainerName,
-								ImagePullPolicy: corev1.PullAlways,
-							},
-						},
+						Containers: []corev1.Container{{
+							Name:            flinkMainContainerName,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+						}},
 					},
 				}).
 				Obj(),
 		},
-		"allows removing flink-main-container imagePullPolicy in taskManager.podTemplate while running in standalone mode with omitted spec.imagePullPolicy": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("app-standalone-pull-rm", "ns").
-				Queue("lq").
-				Suspend(false).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerReplicas(2).
-				TaskManagerResource(new(1.0), "2048m", "").
-				TaskManagerPodTemplate(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:            flinkMainContainerName,
-								ImagePullPolicy: corev1.PullAlways,
-							},
-						},
-					},
-				}).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("app-standalone-pull-rm", "ns").
-				Queue("lq").
-				Suspend(false).
-				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
-				TaskManagerReplicas(2).
-				TaskManagerResource(new(1.0), "2048m", "").
-				Obj(),
-		},
-		"rejects reviving or replacing a running FlinkDeployment via restartNonce, jarURI, or args once its owned Workload is Finished": {
-			oldJob: baseAdmittedRunning,
+		"rejects scaling TaskManager replicas while running": {
+			oldJob: baseRunning,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.RestartNonce = new(int64(2))
-				cp.Spec.Job.SavepointRedeployNonce = new(int64(2))
-				cp.Spec.Job.JarURI = "local:///opt/flink/usrlib/new-job.jar"
-				cp.Spec.Job.Args = []string{"--env", "prod"}
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects reviving a terminal running FlinkDeployment even before WorkloadFinished is patched or when Workload was deleted": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateDeployed
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFailed
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateDeployed
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFailed
-				cp.Spec.RestartNonce = new(int64(1))
-				return cp
-			}(),
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects suspending a running FlinkDeployment whose owned Workload is Finished": {
-			oldJob: baseAdmittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects suspending a terminal running FlinkDeployment before WorkloadFinished is patched when Workload is not deleting": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			workloads: []*kueue.Workload{baseAdmittedWl},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"allows Stop overlay-restoring suspension on a terminal running FlinkDeployment when non-finished Workload has deletionTimestamp": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				return cp
-			}(),
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.DeletionTimestamp = &now
-					wl.Finalizers = []string{kueue.ResourceInUseFinalizerName}
-					return wl
-				}(),
-			},
-		},
-		"rejects plain suspension without overlay restore on a terminal running FlinkDeployment when non-finished Workload has deletionTimestamp": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Status.LifecycleState = flinkv1beta1.LifecycleStateStable
-				cp.Status.ReconciliationStatus.State = flinkv1beta1.ReconciliationStateDeployed
-				cp.Status.JobStatus.State = flinkv1beta1.JobStatusStateFinished
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.DeletionTimestamp = &now
-					wl.Finalizers = []string{kueue.ResourceInUseFinalizerName}
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"allows metadata-only updates without touching spec on a running FlinkDeployment whose owned Workload is Finished": {
-			oldJob: baseAdmittedRunning,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				if cp.Annotations == nil {
-					cp.Annotations = make(map[string]string)
-				}
-				cp.Annotations["example.com/audit"] = "archived"
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"rejects running -> suspended transition that mutates component resources memory from 1536Mi to fractional 1.5Gi": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"1","memory":"1536Mi"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(oldJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"1","memory":"1.5Gi"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(newJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "taskManager", "resources"),
-					field.OmitValueType{},
-					`resource request memory (1.5Gi): memory size "1.5Gi" must not contain a decimal point; must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes`,
-				),
-			},
-		},
-		"rejects running -> suspended transition that mutates component resources cpu from 1 to whitespace-padded \" 1 \"": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"1","memory":"2Gi"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(oldJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":" 1 ","memory":"2Gi"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(newJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec", "taskManager", "resources"),
-					field.OmitValueType{},
-					`resource request cpu (" 1 ") must not contain whitespace`,
-				),
-			},
-		},
-		"rejects running -> suspended transition that injects explicit empty container image override into component podTemplate": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.Image = ""
-				fd.Spec.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"containers":[{"name":"flink-main-container","image":"flink:1.20"}]}}`), fd.Spec.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(base podTemplate) error: %v", err)
-				}
-				fd.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"containers":[{"name":"flink-main-container","workingDir":"/work"}]}}`), fd.Spec.TaskManager.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(old tm podTemplate) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.Image = ""
-				fd.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				fd.Spec.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"containers":[{"name":"flink-main-container","image":"flink:1.20"}]}}`), fd.Spec.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(base podTemplate) error: %v", err)
-				}
-				fd.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"containers":[{"name":"flink-main-container","workingDir":"/work","image":""}]}}`), fd.Spec.TaskManager.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(new tm podTemplate) error: %v", err)
-				}
-				return fd
-			}(),
-			wantErrs: field.ErrorList{
-				field.Required(
-					field.NewPath("spec", "image"),
-					"image must be specified via spec.image or flink-main-container in podTemplate",
-				),
-			},
-		},
-		"rejects running -> suspended transition that injects explicit hostNetwork false override into component podTemplate": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"hostNetwork":true}}`), fd.Spec.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(base podTemplate) error: %v", err)
-				}
-				fd.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"metadata":{"labels":{"role":"tm"}}}`), fd.Spec.TaskManager.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(old tm podTemplate) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseRunning.DeepCopy()
-				fd.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				fd.Spec.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"spec":{"hostNetwork":true}}`), fd.Spec.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(base podTemplate) error: %v", err)
-				}
-				fd.Spec.TaskManager.PodTemplate = &flinkv1beta1.PodTemplateSpec{}
-				if err := json.Unmarshal([]byte(`{"metadata":{"labels":{"role":"tm"}},"spec":{"hostNetwork":false}}`), fd.Spec.TaskManager.PodTemplate); err != nil {
-					t.Fatalf("json.Unmarshal(new tm podTemplate) error: %v", err)
-				}
-				return fd
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects post-finish update that mutates component resources memory from plain integer 1000000000 to 1G": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseAdmittedRunning.DeepCopy()
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"1","memory":"1000000000"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(oldJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseAdmittedRunning.DeepCopy()
-				fd.Spec.TaskManager.Resource = nil
-				if err := json.Unmarshal([]byte(`{"requests":{"cpu":"1","memory":"1G"}}`), &fd.Spec.TaskManager.Resources); err != nil {
-					t.Fatalf("json.Unmarshal(newJob resources) error: %v", err)
-				}
-				return fd
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects post-finish update that toggles flinkConfiguration JSON null to string \"null\"": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseAdmittedRunning.DeepCopy()
-				if err := json.Unmarshal([]byte(`{"user.custom.opt":null}`), &fd.Spec.FlinkConfiguration); err != nil {
-					t.Fatalf("json.Unmarshal(oldCfg) error: %v", err)
-				}
-				return fd
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				fd := baseAdmittedRunning.DeepCopy()
-				if err := json.Unmarshal([]byte(`{"user.custom.opt":"null"}`), &fd.Spec.FlinkConfiguration); err != nil {
-					t.Fatalf("json.Unmarshal(newCfg) error: %v", err)
-				}
-				return fd
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
-			},
-		},
-		"rejects two-step suspend-then-mutate spec and max-exec-time-seconds changes on a finished FlinkDeployment": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3600"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
+				cp := baseRunning.DeepCopy()
 				cp.Spec.TaskManager.Replicas = new(int64(4))
-				cp.Spec.Job.JarURI = "local:///opt/flink/usrlib/resurrect.jar"
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "7200"
 				return cp
 			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel),
-					"7200",
-					apivalidation.FieldImmutableErrorMsg,
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, immutableNotSuspendedMsg),
 			},
 		},
-		"allows detaching queue-name while suspended on a finished FlinkDeployment": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
+		"rejects changing or stripping queue-name while running": {
+			oldJob: baseRunning,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
+				cp := baseRunning.DeepCopy()
 				delete(cp.Labels, constants.QueueLabel)
 				return cp
 			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadFinishedReasonSucceeded,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"allows repairing suspended spec in place when Workload finished with FailedToStart before starting": {
-			oldJob: baseSuspended,
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             jobframework.FailedToStartFinishedReason,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"allows repairing suspended spec in place after queued podTemplate labels, annotations, nodeSelector, and schedulingGates edits caused FailedToStart": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Labels:      map[string]string{"team": "streaming"},
-					Annotations: map[string]string{"owner": "analytics"},
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"gpu-pool": "conflicting-pool"},
-						SchedulingGates: []corev1.PodSchedulingGate{
-							{Name: "example.com/precheck"},
-						},
-					},
-				})
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				cp.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Labels:      map[string]string{"team": "streaming"},
-					Annotations: map[string]string{"owner": "analytics"},
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"gpu-pool": "a100"},
-						SchedulingGates: []corev1.PodSchedulingGate{
-							{Name: "example.com/precheck"},
-						},
-					},
-				})
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             jobframework.FailedToStartFinishedReason,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"rejects mutating suspended FlinkDeployment carrying Kueue WorkloadAnnotation overlay without flavor tolerations when Workload finished with FailedToStart": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.JobManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Annotations: map[string]string{kueue.WorkloadAnnotation: baseAdmittedWl.Name},
-					Labels: map[string]string{
-						kueueconstants.PodSetLabel:     string(jobManagerPodSetName),
-						kueueconstants.LocalQueueLabel: "lq",
-					},
-				})
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             jobframework.FailedToStartFinishedReason,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("metadata", "labels").Key(constants.QueueLabel), "", apivalidation.FieldImmutableErrorMsg),
 			},
 		},
-		"allows repairing suspended spec in place when Workload finished with FailedToStart and merged containers have duplicate env names": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Env: []corev1.EnvVar{
-									{Name: "JAVA_OPTS", Value: "-Xmx1g"},
-									{Name: "SHARED_ENV", Value: "from-base"},
-								},
-							},
-						},
-					},
-				})
-				cp.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Env: []corev1.EnvVar{
-									{Name: "SHARED_ENV", Value: "from-role-override"},
-								},
-							},
-						},
-					},
-				})
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				cp.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Env: []corev1.EnvVar{
-									{Name: "JAVA_OPTS", Value: "-Xmx1g"},
-									{Name: "SHARED_ENV", Value: "from-base"},
-								},
-							},
-						},
-					},
-				})
-				cp.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Env: []corev1.EnvVar{
-									{Name: "SHARED_ENV", Value: "from-role-override"},
-								},
-							},
-						},
-					},
-				})
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					ownerWithDupEnv := baseSuspended.DeepCopy()
-					ownerWithDupEnv.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: flinkMainContainerName,
-									Env: []corev1.EnvVar{
-										{Name: "JAVA_OPTS", Value: "-Xmx1g"},
-										{Name: "SHARED_ENV", Value: "from-base"},
-									},
-								},
-							},
-						},
-					})
-					ownerWithDupEnv.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: flinkMainContainerName,
-									Env: []corev1.EnvVar{
-										{Name: "SHARED_ENV", Value: "from-role-override"},
-									},
-								},
-							},
-						},
-					})
-					sanitizedPodSets, psErr := jobframework.JobPodSets(stopJobCtx, fromObject(ownerWithDupEnv), nil)
-					if psErr != nil {
-						t.Fatalf("JobPodSets() error: %v", psErr)
-					}
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Spec.PodSets = sanitizedPodSets
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             jobframework.FailedToStartFinishedReason,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"rejects mutating suspended FlinkDeployment with stale admitted overlays even when Workload finished with FailedToStart": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseAdmittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Spec.TaskManager.Replicas = new(int64(2))
-				return cp
-			}(),
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := baseAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadFinished,
-						Status:             metav1.ConditionTrue,
-						Reason:             jobframework.FailedToStartFinishedReason,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
+		"rejects spec.mode change while running even when derived PodSets are unchanged": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				ImagePullPolicy(corev1.PullIfNotPresent).
+				ServiceAccount("default").
+				Suspend(false).
+				TaskManagerResource(new(1.0), "2048m", "").
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				ImagePullPolicy(corev1.PullIfNotPresent).
+				ServiceAccount("default").
+				Suspend(false).
+				Mode(flinkv1beta1.KubernetesDeploymentModeStandalone).
+				TaskManagerResource(new(1.0), "2048m", "").
+				Obj(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec", "mode"), flinkv1beta1.KubernetesDeploymentModeStandalone, immutableNotSuspendedMsg),
 			},
 		},
-		"allows Stop suspended -> suspended RestorePodSetsInfo patch when Workload is evicted after manual suspension": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			newJob:    restoredAfterStopJob,
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-						Type:               kueue.WorkloadEvicted,
-						Status:             metav1.ConditionTrue,
-						Reason:             kueue.WorkloadDeactivated,
-						LastTransitionTime: now,
-					})
-					return wl
-				}(),
-			},
-		},
-		"allows Stop suspended -> suspended RestorePodSetsInfo patch when Workload has deletionTimestamp after manual suspension": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				return cp
-			}(),
-			newJob:    restoredAfterStopJob,
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.DeletionTimestamp = &now
-					wl.Finalizers = []string{kueue.ResourceInUseFinalizerName}
-					return wl
-				}(),
-			},
-		},
-		"rejects invalid max-exec-time-seconds on metadata-only update when Workload is evicted and already restored": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3600"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "30m"
-				return cp
-			}(),
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.Status.Admission = nil
-					wl.Status.Conditions = []metav1.Condition{
-						{
-							Type:               kueue.WorkloadQuotaReserved,
-							Status:             metav1.ConditionFalse,
-							Reason:             kueue.WorkloadEvicted,
-							LastTransitionTime: now,
-						},
-						{
-							Type:               kueue.WorkloadEvicted,
-							Status:             metav1.ConditionTrue,
-							Reason:             kueue.WorkloadDeactivated,
-							LastTransitionTime: now,
-						},
-					}
-					return wl
-				}(),
-			},
+		"rejects clearing spec.serviceAccount, spec.image, or spec.imagePullPolicy while running even when podTemplate fallback keeps derived PodSets identical": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				Image("flink:1.20").
+				ImagePullPolicy(corev1.PullAlways).
+				ServiceAccount("custom-sa").
+				Suspend(false).
+				PodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						ServiceAccountName: "custom-sa",
+						Containers: []corev1.Container{{
+							Name:            flinkMainContainerName,
+							Image:           "flink:1.20",
+							ImagePullPolicy: corev1.PullAlways,
+						}},
+					},
+				}).
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				Image("").
+				Suspend(false).
+				PodTemplate(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						ServiceAccountName: "custom-sa",
+						Containers: []corev1.Container{{
+							Name:            flinkMainContainerName,
+							Image:           "flink:1.20",
+							ImagePullPolicy: corev1.PullAlways,
+						}},
+					},
+				}).
+				Obj(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel),
-					"30m",
-					`strconv.Atoi: parsing "30m": invalid syntax`,
-				),
+				field.Invalid(field.NewPath("spec", "image"), "", immutableNotSuspendedMsg),
+				field.Invalid(field.NewPath("spec", "imagePullPolicy"), corev1.PullPolicy(""), immutableNotSuspendedMsg),
+				field.Invalid(field.NewPath("spec", "serviceAccount"), "", immutableNotSuspendedMsg),
 			},
 		},
-		"rejects overflowing max-exec-time-seconds combined with Stop RestorePodSetsInfo update when Workload is evicted": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := admittedRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3600"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3000000000"
-				return cp
-			}(),
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.Status.Admission = nil
-					wl.Status.Conditions = []metav1.Condition{
-						{
-							Type:               kueue.WorkloadQuotaReserved,
-							Status:             metav1.ConditionFalse,
-							Reason:             kueue.WorkloadEvicted,
-							LastTransitionTime: now,
-						},
-						{
-							Type:               kueue.WorkloadEvicted,
-							Status:             metav1.ConditionTrue,
-							Reason:             kueue.WorkloadDeactivated,
-							LastTransitionTime: now,
-						},
-					}
-					return wl
-				}(),
-			},
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel),
-					3000000000,
-					fmt.Sprintf("should be less than or equal to %d", math.MaxInt32),
-				),
-			},
-		},
-		"rejects non-positive max-exec-time-seconds on terminating suspended FlinkDeployment": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "0"
-				return cp
-			}(),
-			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.MaxExecTimeSecondsLabel),
-					0,
-					"should be greater than 0",
-				),
-			},
-		},
-		"allows valid max-exec-time-seconds update when suspended and Workload is evicted without quota reservation": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "3600"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := restoredAfterStopJob.DeepCopy()
-				cp.Labels[constants.MaxExecTimeSecondsLabel] = "1800"
-				return cp
-			}(),
-			enableTAS: true,
-			workloads: []*kueue.Workload{
-				func() *kueue.Workload {
-					wl := tasAdmittedWl.DeepCopy()
-					wl.Status.Admission = nil
-					wl.Status.Conditions = []metav1.Condition{
-						{
-							Type:               kueue.WorkloadQuotaReserved,
-							Status:             metav1.ConditionFalse,
-							Reason:             kueue.WorkloadEvicted,
-							LastTransitionTime: now,
-						},
-						{
-							Type:               kueue.WorkloadEvicted,
-							Status:             metav1.ConditionTrue,
-							Reason:             kueue.WorkloadDeactivated,
-							LastTransitionTime: now,
-						},
-					}
-					return wl
-				}(),
-			},
-		},
-		"returns ErrWorkloadOwnerNotFound on terminating child FlinkDeployment with missing owner when SkipAncestorCheckForDeletedWorkloads is disabled": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
+		"rejects mutating root spec.podTemplate while running": {
+			oldJob: baseRunning,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
 				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
-			disableSkipAncestorCheck:   true,
-			manageJobsWithoutQueueName: true,
-			wantNonFieldErr:            jobframework.ErrWorkloadOwnerNotFound,
-		},
-		"allows finalizer removal on terminating child FlinkDeployment with missing owner when SkipAncestorCheckForDeletedWorkloads is enabled": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "already-deleted-parent",
-					UID:        types.UID("gone"),
-					Controller: new(true),
-				}}
-				return cp
-			}(),
-			manageJobsWithoutQueueName: true,
-		},
-		"allows finalizer removal on terminating top-level FlinkDeployment with pre-existing invalid spec under default SkipAncestorCheckForDeletedWorkloads": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Spec.JobManager.Resource.Memory = ""
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Spec.JobManager.Resource.Memory = ""
-				return cp
-			}(),
-		},
-		"allows finalizer removal on terminating pre-existing queue-labeled Session cluster under default SkipAncestorCheckForDeletedWorkloads": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := testingflinkdeployment.MakeFlinkDeployment("legacy-session", "ns").
-					Queue("lq").
-					SessionCluster().
-					Obj()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := testingflinkdeployment.MakeFlinkDeployment("legacy-session", "ns").
-					Queue("lq").
-					SessionCluster().
-					Obj()
-				cp.DeletionTimestamp = &now
-				return cp
-			}(),
-		},
-		"rejects spec and label mutations on terminating FlinkDeployment under default SkipAncestorCheckForDeletedWorkloads": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Labels[constants.WorkloadPriorityClassLabel] = "high-prio"
-				return cp
-			}(),
-			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Spec.Job.State = flinkv1beta1.JobStateRunning
-				cp.Spec.TaskManager.Replicas = new(int64(4))
+				cp.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{NodeSelector: map[string]string{"zone": "us-east1-b"}},
+				})
 				return cp
 			}(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "labels").Key(constants.WorkloadPriorityClassLabel),
-					"",
-					"WorkloadPriorityClass cannot be removed from a workload",
-				),
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is being deleted", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec", "podTemplate"), field.OmitValueType{}, immutableNotSuspendedMsg),
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, immutableNotSuspendedMsg),
 			},
 		},
-		"rejects spec mutation on terminating top-level FlinkDeployment even when newObj injects fake missing OwnerReference": {
-			oldJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				return cp
-			}(),
+		"rejects mutating taskmanager.numberOfTaskSlots, merge-arrays-by-name, or spec.job.parallelism while running even when explicit replicas and CPU keep PodSets identical": {
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				Suspend(false).
+				Parallelism(2).
+				TaskManagerReplicas(2).
+				TaskManagerResource(new(2.0), "2048m", "").
+				FlinkConfig("taskmanager.numberOfTaskSlots", "2").
+				FlinkConfig("kubernetes.operator.pod-template.merge-arrays-by-name", "false").
+				Obj(),
+			newJob: testingflinkdeployment.MakeFlinkDeployment("app", "ns").
+				Queue("lq").
+				Suspend(false).
+				Parallelism(4).
+				TaskManagerReplicas(2).
+				TaskManagerResource(new(2.0), "2048m", "").
+				FlinkConfig("taskmanager.numberOfTaskSlots", "4").
+				FlinkConfig("kubernetes.operator.pod-template.merge-arrays-by-name", "true").
+				Obj(),
+			wantErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "job", "parallelism"), int64(4), immutableNotSuspendedMsg),
+				field.Invalid(field.NewPath("spec", "flinkConfiguration").Key("taskmanager.numberOfTaskSlots"), "4", immutableNotSuspendedMsg),
+				field.Invalid(field.NewPath("spec", "flinkConfiguration").Key("kubernetes.operator.pod-template.merge-arrays-by-name"), "true", immutableNotSuspendedMsg),
+			},
+		},
+		"rejects live in-place scaling via pipeline.jobvertex-parallelism-overrides.<vertexId> while running in native mode": {
+			oldJob: baseRunning,
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseSuspended.DeepCopy()
-				cp.DeletionTimestamp = &now
-				cp.Finalizers = []string{"flinkdeployments.flink.apache.org/finalizer"}
-				cp.Spec.Job.State = flinkv1beta1.JobStateRunning
-				cp.OwnerReferences = []metav1.OwnerReference{{
-					APIVersion: flinkv1beta1.SchemeGroupVersion.String(),
-					Kind:       "FlinkDeployment",
-					Name:       "forged-missing-parent",
-					UID:        types.UID("forged"),
-					Controller: new(true),
-				}}
+				cp := baseRunning.DeepCopy()
+				cp.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{"pipeline.jobvertex-parallelism-overrides.v1": "8"})
 				return cp
 			}(),
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is being deleted", apivalidation.FieldImmutableErrorMsg),
+				field.Forbidden(
+					field.NewPath("spec", "flinkConfiguration").Key("pipeline.jobvertex-parallelism-overrides.v1"),
+					"spec.mode must be standalone and spec.taskManager.replicas must be explicitly set when pipeline.jobvertex-parallelism-overrides.v1 is configured",
 				),
 			},
 		},
@@ -4537,22 +3087,12 @@ func TestValidateUpdate(t *testing.T) {
 			enableWorkloadLevelWFPR: true,
 			maxTimeoutOnWorkload:    &metav1.Duration{Duration: 5 * time.Minute},
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation),
-					"",
-					"timeoutSeconds must be less than or equal to 300 seconds",
-				),
-				field.Invalid(
-					field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation),
-					"",
-					"recoveryTimeoutSeconds must be less than or equal to 300 seconds",
-				),
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation), "", "timeoutSeconds must be less than or equal to 300 seconds"),
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation), "", "recoveryTimeoutSeconds must be less than or equal to 300 seconds"),
 			},
 		},
 		"deduplicates wait-for-pods-ready error on single-step unmanaged-to-managed update exceeding maxTimeoutOnWorkload": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-app", "ns").
-				Suspend(true).
-				Obj(),
+			oldJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-app", "ns").Suspend(true).Obj(),
 			newJob: testingflinkdeployment.MakeFlinkDeployment("unmanaged-app", "ns").
 				Queue("lq").
 				Suspend(true).
@@ -4561,43 +3101,24 @@ func TestValidateUpdate(t *testing.T) {
 			enableWorkloadLevelWFPR: true,
 			maxTimeoutOnWorkload:    &metav1.Duration{Duration: 5 * time.Minute},
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation),
-					"",
-					"timeoutSeconds must be less than or equal to 300 seconds",
-				),
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.WaitForPodsReadyAnnotation), "", "timeoutSeconds must be less than or equal to 300 seconds"),
 			},
 		},
 		"allows update on already-managed FlinkDeployment when unchanged wait-for-pods-ready exceeds lowered maxTimeoutOnWorkload": {
 			oldJob: func() *flinkv1beta1.FlinkDeployment {
 				cp := baseRunning.DeepCopy()
-				cp.Annotations = map[string]string{
-					constants.WaitForPodsReadyAnnotation: `{"timeoutSeconds":86400}`,
-				}
+				cp.Annotations = map[string]string{constants.WaitForPodsReadyAnnotation: `{"timeoutSeconds":86400}`}
 				return cp
 			}(),
 			newJob: func() *flinkv1beta1.FlinkDeployment {
-				cp := baseRunning.DeepCopy()
-				cp.Spec.Job.State = flinkv1beta1.JobStateSuspended
-				cp.Annotations = map[string]string{
-					constants.WaitForPodsReadyAnnotation: `{"timeoutSeconds":86400}`,
-				}
+				cp := baseSuspended.DeepCopy()
+				cp.Annotations = map[string]string{constants.WaitForPodsReadyAnnotation: `{"timeoutSeconds":86400}`}
 				return cp
 			}(),
 			enableWorkloadLevelWFPR: true,
 			maxTimeoutOnWorkload:    &metav1.Duration{Duration: 5 * time.Minute},
 		},
-		"allows running -> suspended transition on child FlinkDeployment owned by Kueue-managed ancestor": {
-			oldJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1),
-			newJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateSuspended, 1),
-			extraObjects: []client.Object{ancestorParent},
-		},
-		"allows suspended -> running transition without child Workload on child FlinkDeployment owned by Kueue-managed ancestor": {
-			oldJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateSuspended, 1),
-			newJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1),
-			extraObjects: []client.Object{ancestorParent},
-		},
-		"allows running -> running replica scaling on child FlinkDeployment owned by Kueue-managed ancestor": {
+		"allows state transitions and replica scaling on child FlinkDeployment owned by Kueue-managed ancestor": {
 			oldJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 1),
 			newJob:       makeAncestorOwnedChild(flinkv1beta1.JobStateRunning, 4),
 			extraObjects: []client.Object{ancestorParent},
@@ -4611,28 +3132,16 @@ func TestValidateUpdate(t *testing.T) {
 			}(),
 			nilIntegrationManager: true,
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, immutableNotSuspendedMsg),
 			},
 		},
-		"nil integrationManager with manageJobsWithoutQueueName=true rejects direct unsuspend of unlabeled Application FlinkDeployment without admitted Workload": {
-			oldJob: testingflinkdeployment.MakeFlinkDeployment("unlabeled-nil-mgr", "ns").
-				Suspend(true).
-				Obj(),
-			newJob: testingflinkdeployment.MakeFlinkDeployment("unlabeled-nil-mgr", "ns").
-				Suspend(false).
-				Obj(),
+		"nil integrationManager with manageJobsWithoutQueueName=true enforces running-state immutability on unlabeled Application FlinkDeployment": {
+			oldJob:                     testingflinkdeployment.MakeFlinkDeployment("unlabeled-nil-mgr", "ns").Suspend(false).Obj(),
+			newJob:                     testingflinkdeployment.MakeFlinkDeployment("unlabeled-nil-mgr", "ns").Suspend(false).TaskManagerReplicas(4).Obj(),
 			nilIntegrationManager:      true,
 			manageJobsWithoutQueueName: true,
 			wantErrs: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec"),
-					field.OmitValueType{},
-					fmt.Sprintf("%s when FlinkDeployment is not suspended", apivalidation.FieldImmutableErrorMsg),
-				),
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, immutableNotSuspendedMsg),
 			},
 		},
 	}
@@ -4640,26 +3149,18 @@ func TestValidateUpdate(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, tc.enableTAS)
+			if tc.enableTASTopologySpreading {
+				features.SetFeatureGateDuringTest(t, features.TASTopologySpreading, true)
+			}
 			features.SetFeatureGateDuringTest(t, features.SkipAncestorCheckForDeletedWorkloads, !tc.disableSkipAncestorCheck)
 			features.SetFeatureGateDuringTest(t, features.WorkloadLevelWaitForPodsReady, tc.enableWorkloadLevelWFPR)
 			ctx, _ := utiltesting.ContextWithLog(t)
-			builder := utiltesting.NewClientBuilder(flinkv1beta1.AddToScheme).WithObjects(&corev1.Namespace{
-				Name: "ns",
-			})
-			if err := SetupIndexes(ctx, utiltesting.AsIndexer(builder)); err != nil {
-				t.Fatalf("SetupIndexes() error: %v", err)
-			}
+			builder := utiltesting.NewClientBuilder(flinkv1beta1.AddToScheme).WithObjects(&corev1.Namespace{Name: "ns"})
 			if len(tc.extraObjects) > 0 {
 				builder = builder.WithObjects(tc.extraObjects...)
 			}
 			if tc.defaultQueue != nil {
 				builder = builder.WithObjects(tc.defaultQueue)
-			}
-			for _, flv := range tc.flavors {
-				builder = builder.WithObjects(flv)
-			}
-			for _, wl := range tc.workloads {
-				builder = builder.WithObjects(wl)
 			}
 			cl := builder.Build()
 			var queues *qcache.Manager
@@ -4691,202 +3192,6 @@ func TestValidateUpdate(t *testing.T) {
 			gotErrs := extractFieldErrors(t, err)
 			if diff := cmp.Diff(tc.wantErrs, gotErrs, cmpopts.IgnoreFields(field.Error{}, "BadValue")); diff != "" {
 				t.Errorf("ValidateUpdate() error list mismatch (-want,+got):\n%s\nfull err: %v", diff, err)
-			}
-		})
-	}
-}
-
-func TestValidateUpdateWorkloadLookup(t *testing.T) {
-	now := metav1.NewTime(time.Now())
-	owner := testingflinkdeployment.MakeFlinkDeployment("target-app", "ns").
-		Queue("lq").
-		UID("uid-target").
-		Suspend(true).
-		Obj()
-	ownerPodSets, err := fromObject(owner).PodSets(t.Context(), nil)
-	if err != nil {
-		t.Fatalf("owner PodSets() error: %v", err)
-	}
-	scaledUpdate := owner.DeepCopy()
-	scaledUpdate.Spec.TaskManager.Replicas = new(int64(4))
-
-	deterministicWlName := GetWorkloadNameForFlinkDeployment(owner.Name, owner.UID)
-	makeQuotaReservedWorkload := func(name string, uid types.UID, finished bool) *kueue.Workload {
-		wl := utiltestingapi.MakeWorkload(name, owner.Namespace).
-			Queue("lq").
-			PodSets(ownerPodSets...).
-			ControllerReference(gvk, owner.Name, string(uid)).
-			ReserveQuotaAt(
-				utiltestingapi.MakeAdmission("cq").
-					PodSets(
-						utiltestingapi.MakePodSetAssignment(jobManagerPodSetName).Obj(),
-						utiltestingapi.MakePodSetAssignment(taskManagerPodSetName).Obj(),
-					).
-					Obj(),
-				now.Time,
-			).
-			AdmittedAt(false, now.Time).
-			Obj()
-		if finished {
-			wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
-				Type:               kueue.WorkloadFinished,
-				Status:             metav1.ConditionTrue,
-				Reason:             kueue.WorkloadFinishedReasonSucceeded,
-				LastTransitionTime: now,
-			})
-		}
-		return wl
-	}
-
-	unrelatedWl := utiltestingapi.MakeWorkload("unrelated-wl", owner.Namespace).
-		Queue("lq").
-		PodSets(ownerPodSets...).
-		ControllerReference(gvk, "other-app", "uid-other").
-		Obj()
-
-	quotaReservedImmutableErrs := field.ErrorList{
-		field.Invalid(
-			field.NewPath("spec"),
-			field.OmitValueType{},
-			fmt.Sprintf("%s while Workload has quota reserved", apivalidation.FieldImmutableErrorMsg),
-		),
-	}
-	finishedImmutableErrs := field.ErrorList{
-		field.Invalid(
-			field.NewPath("spec"),
-			field.OmitValueType{},
-			fmt.Sprintf("%s once Workload is finished", apivalidation.FieldImmutableErrorMsg),
-		),
-	}
-
-	testCases := map[string]struct {
-		workloads         []*kueue.Workload
-		wantWorkloadGets  int
-		wantWorkloadLists int
-		wantIndexedItems  int
-		wantErrs          field.ErrorList
-	}{
-		"deterministic Get finds active Workload without WorkloadList scan": {
-			workloads: []*kueue.Workload{
-				makeQuotaReservedWorkload(deterministicWlName, owner.UID, false),
-				unrelatedWl,
-			},
-			wantWorkloadGets:  1,
-			wantWorkloadLists: 0,
-			wantErrs:          quotaReservedImmutableErrs,
-		},
-		"falls back to indexed zero-deepcopy List when deterministic Workload is not found": {
-			workloads: []*kueue.Workload{
-				makeQuotaReservedWorkload("custom-wl-name", owner.UID, false),
-				unrelatedWl,
-			},
-			wantWorkloadGets:  1,
-			wantWorkloadLists: 1,
-			wantIndexedItems:  1,
-			wantErrs:          quotaReservedImmutableErrs,
-		},
-		"falls through to indexed List when deterministic-name Workload is finished and resolves active replacement": {
-			workloads: []*kueue.Workload{
-				makeQuotaReservedWorkload(deterministicWlName, owner.UID, true),
-				makeQuotaReservedWorkload("custom-wl-replacement", owner.UID, false),
-				unrelatedWl,
-			},
-			wantWorkloadGets:  1,
-			wantWorkloadLists: 1,
-			wantIndexedItems:  2,
-			wantErrs:          quotaReservedImmutableErrs,
-		},
-		"enforces post-finish spec immutability when finished deterministic-name Workload has no active replacement": {
-			workloads: []*kueue.Workload{
-				makeQuotaReservedWorkload(deterministicWlName, owner.UID, true),
-				unrelatedWl,
-			},
-			wantWorkloadGets:  1,
-			wantWorkloadLists: 1,
-			wantIndexedItems:  1,
-			wantErrs:          finishedImmutableErrs,
-		},
-		"falls through to indexed List when deterministic-name Workload has a different controller UID": {
-			workloads: []*kueue.Workload{
-				utiltestingapi.MakeWorkload(deterministicWlName, owner.Namespace).
-					Queue("lq").
-					PodSets(ownerPodSets...).
-					ControllerReference(gvk, owner.Name, "uid-stale").
-					Obj(),
-				makeQuotaReservedWorkload("custom-wl-active", owner.UID, false),
-				unrelatedWl,
-			},
-			wantWorkloadGets:  1,
-			wantWorkloadLists: 1,
-			wantIndexedItems:  2,
-			wantErrs:          quotaReservedImmutableErrs,
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			ctx, _ := utiltesting.ContextWithLog(t)
-
-			objs := make([]client.Object, 0, len(tc.workloads)+1)
-			objs = append(objs, &corev1.Namespace{Name: owner.Namespace})
-			for _, wl := range tc.workloads {
-				objs = append(objs, wl.DeepCopy())
-			}
-
-			var workloadGets, workloadLists int
-			var sawFieldSelector, sawDisableDeepCopy bool
-			builder := utiltesting.NewClientBuilder().
-				WithObjects(objs...).
-				WithInterceptorFuncs(interceptor.Funcs{
-					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-						if _, ok := obj.(*kueue.Workload); ok {
-							workloadGets++
-						}
-						return c.Get(ctx, key, obj, opts...)
-					},
-					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-						wlList, isWlList := list.(*kueue.WorkloadList)
-						if isWlList {
-							workloadLists++
-							listOpts := &client.ListOptions{}
-							listOpts.ApplyOptions(opts)
-							if listOpts.FieldSelector != nil && listOpts.FieldSelector.String() != "" {
-								sawFieldSelector = true
-							}
-							if listOpts.UnsafeDisableDeepCopy != nil && *listOpts.UnsafeDisableDeepCopy {
-								sawDisableDeepCopy = true
-							}
-						}
-						if err := c.List(ctx, list, opts...); err != nil {
-							return err
-						}
-						if isWlList && len(wlList.Items) != tc.wantIndexedItems {
-							t.Errorf("indexed WorkloadList returned %d items, want %d", len(wlList.Items), tc.wantIndexedItems)
-						}
-						return nil
-					},
-				})
-			if err := SetupIndexes(ctx, utiltesting.AsIndexer(builder)); err != nil {
-				t.Fatalf("SetupIndexes() error: %v", err)
-			}
-
-			wh := &flinkDeploymentWebhook{
-				integrationManager:           newTestIntegrationManager(t),
-				client:                       builder.Build(),
-				managedJobsNamespaceSelector: labels.Everything(),
-			}
-			_, err := wh.ValidateUpdate(ctx, owner, scaledUpdate)
-			gotErrs := extractFieldErrors(t, err)
-			if diff := cmp.Diff(tc.wantErrs, gotErrs, cmpopts.IgnoreFields(field.Error{}, "BadValue")); diff != "" {
-				t.Errorf("ValidateUpdate() error list mismatch (-want,+got):\n%s\nfull err: %v", diff, err)
-			}
-			if workloadGets != tc.wantWorkloadGets || workloadLists != tc.wantWorkloadLists {
-				t.Errorf("Workload client calls = (get=%d, list=%d), want (get=%d, list=%d)",
-					workloadGets, workloadLists, tc.wantWorkloadGets, tc.wantWorkloadLists)
-			}
-			if tc.wantWorkloadLists > 0 && (!sawFieldSelector || !sawDisableDeepCopy) {
-				t.Errorf("fallback WorkloadList options = (fieldSelector=%v, disableDeepCopy=%v), want (true, true)",
-					sawFieldSelector, sawDisableDeepCopy)
 			}
 		})
 	}

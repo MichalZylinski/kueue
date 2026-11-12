@@ -427,21 +427,6 @@ func TestValidateComponentMemoryQuantity(t *testing.T) {
 		qty           func(*testing.T) flinkv1beta1.Quantity
 		wantErrSubstr string
 	}{
-		"accepts plain integer bytes string 1000000000": {
-			qty: fromJSON(`"1000000000"`),
-		},
-		"accepts plain integer bytes JSON number 1000000000": {
-			qty: fromJSON(`1000000000`),
-		},
-		"accepts plain integer bytes string 1024000": {
-			qty: fromJSON(`"1024000"`),
-		},
-		"accepts plain integer bytes string 2147483648": {
-			qty: fromJSON(`"2147483648"`),
-		},
-		"accepts plain integer bytes string 1073741824": {
-			qty: fromJSON(`"1073741824"`),
-		},
 		"accepts Ki BinarySI": {
 			qty: fromJSON(`"64Ki"`),
 		},
@@ -462,8 +447,20 @@ func TestValidateComponentMemoryQuantity(t *testing.T) {
 		},
 		"accepts QuantityFromResource BinarySI fallback": {
 			qty: func(*testing.T) flinkv1beta1.Quantity {
-				return flinkv1beta1.QuantityFromResource(resource.MustParse("2Gi"))
+				return testingflinkdeployment.QuantityFromResource(resource.MustParse("2Gi"))
 			},
+		},
+		"rejects plain integer bytes string 1000000000": {
+			qty:           fromJSON(`"1000000000"`),
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
+		},
+		"rejects plain integer bytes JSON number 1000000000": {
+			qty:           fromJSON(`1000000000`),
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
+		},
+		"rejects plain integer bytes string 1073741824": {
+			qty:           fromJSON(`"1073741824"`),
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects fractional BinarySI 1.5Gi": {
 			qty:           fromJSON(`"1.5Gi"`),
@@ -479,11 +476,11 @@ func TestValidateComponentMemoryQuantity(t *testing.T) {
 		},
 		"rejects Ei suffix 1Ei": {
 			qty:           fromJSON(`"1Ei"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects overflowing 8Ei": {
 			qty:           fromJSON(`"8Ei"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects 2Pi exceeding Integer.MAX_VALUE MiB": {
 			qty:           fromJSON(`"2Pi"`),
@@ -499,35 +496,39 @@ func TestValidateComponentMemoryQuantity(t *testing.T) {
 		},
 		"rejects negative decimal exponent 2147483648000e-3": {
 			qty:           fromJSON(`"2147483648000e-3"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects DecimalSI 2G": {
 			qty:           fromJSON(`"2G"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects Flink MemorySize / milli-byte 2048m": {
 			qty:           fromJSON(`"2048m"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects Flink MemorySize 2g": {
 			qty:           fromJSON(`"2g"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects GiB suffix 2GiB": {
 			qty:           fromJSON(`"2GiB"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects scientific notation 1e9": {
 			qty:           fromJSON(`"1e9"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects leading plus sign +1Gi": {
 			qty:           fromJSON(`"+1Gi"`),
-			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
+		},
+		"rejects zero 0Mi": {
+			qty:           fromJSON(`"0Mi"`),
+			wantErrSubstr: "must be greater than zero",
 		},
 		"rejects zero 0": {
 			qty:           fromJSON(`"0"`),
-			wantErrSubstr: "must be at least 1 byte",
+			wantErrSubstr: "must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)",
 		},
 		"rejects whitespace-padded literal": {
 			qty:           fromJSON(`" 1Gi "`),
@@ -617,11 +618,11 @@ func TestValidateComponentResourceRequirementsDeferredParseErrors(t *testing.T) 
 	}{
 		"Flink 2g memory in limits reports BinarySI guidance before request <= limit check": {
 			rawJSON:       `{"requests":{"memory":"4Gi"},"limits":{"memory":"2g"}}`,
-			wantErrSubstr: `resource limit memory (2g): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes`,
+			wantErrSubstr: `resource limit memory (2g): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)`,
 		},
 		"GiB suffix in requests reports BinarySI guidance": {
 			rawJSON:       `{"requests":{"memory":"2GiB"}}`,
-			wantErrSubstr: `resource request memory (2GiB): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi) or plain integer bytes`,
+			wantErrSubstr: `resource request memory (2GiB): must use a BinarySI suffix (Ki, Mi, Gi, Ti, Pi)`,
 		},
 		"invalid non-Kubernetes CPU quantity reports parse error": {
 			rawJSON:       `{"requests":{"cpu":"bad-cpu","memory":"2Gi"}}`,
@@ -676,25 +677,25 @@ func TestValidatePodTolerations(t *testing.T) {
 			tolerations: []corev1.Toleration{
 				{Key: "", Value: "gpu", Effect: corev1.TaintEffectNoSchedule},
 			},
-			wantErrSubstr: "operator must be Exists when key is empty",
+			wantErrSubstr: "invalid Equal toleration",
 		},
 		"rejects empty key when operator is Equal": {
 			tolerations: []corev1.Toleration{
 				{Key: "", Operator: corev1.TolerationOpEqual, Value: "gpu"},
 			},
-			wantErrSubstr: "operator must be Exists when key is empty",
+			wantErrSubstr: "invalid Equal toleration",
 		},
 		"rejects unsupported operator": {
 			tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: "In", Value: "gpu"},
 			},
-			wantErrSubstr: `supported values: "Equal", "Exists"`,
+			wantErrSubstr: `unsupported operator "In"`,
 		},
 		"rejects invalid label value when operator is Equal": {
 			tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "bad value!"},
 			},
-			wantErrSubstr: "tolerations[0].value",
+			wantErrSubstr: "invalid Equal toleration",
 		},
 		"rejects non-empty value when operator is Exists": {
 			tolerations: []corev1.Toleration{
@@ -706,7 +707,7 @@ func TestValidatePodTolerations(t *testing.T) {
 			tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: corev1.TolerationOpExists, Effect: "HardEvict"},
 			},
-			wantErrSubstr: `supported values: "NoSchedule", "PreferNoSchedule", "NoExecute"`,
+			wantErrSubstr: `unsupported effect "HardEvict"`,
 		},
 		"rejects tolerationSeconds when effect is not NoExecute": {
 			tolerations: []corev1.Toleration{
@@ -732,7 +733,7 @@ func TestValidatePodTolerations(t *testing.T) {
 	}
 }
 
-func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
+func TestBuildPodSetsContainerNamesAndPositionalSlices(t *testing.T) {
 	makeBaseJob := func() *flinkv1beta1.FlinkDeployment {
 		return testingflinkdeployment.MakeFlinkDeployment("app", "ns").
 			Queue("lq").
@@ -743,116 +744,29 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 		mutate        func(*flinkv1beta1.FlinkDeployment)
 		wantErrSubstr string
 	}{
-		"accepts valid named containers, ports, mounts, devices, claims, ephemeralContainers, and PodSpec list-maps": {
+		"accepts valid named containers, initContainers, ephemeralContainers, and prefix role tolerations": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						InitContainers: []corev1.Container{
-							{
-								Name:  "init-setup",
-								Image: "busybox:1.36",
-								Ports: []corev1.ContainerPort{{ContainerPort: 9000}},
-								Env: []corev1.EnvVar{
-									{Name: "DUP_ALLOWED", Value: "first"},
-									{Name: "DUP_ALLOWED", Value: "second"},
-								},
-							},
+							{Name: "init-setup", Image: "busybox:1.36", Ports: []corev1.ContainerPort{{ContainerPort: 9000}}},
 						},
 						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 8081},
-									{ContainerPort: 8081, Protocol: corev1.ProtocolUDP},
-									{ContainerPort: 8082, Protocol: corev1.ProtocolSCTP},
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{Name: "scratch", MountPath: "/scratch", BindMountOptions: []string{"noexec", "nosuid"}},
-								},
-								VolumeDevices: []corev1.VolumeDevice{
-									{Name: "raw-blk", DevicePath: "/dev/xvda"},
-								},
-								Resources: corev1.ResourceRequirements{
-									Claims: []corev1.ResourceClaim{{Name: "gpu-claim"}},
-								},
-								Env: []corev1.EnvVar{
-									{Name: "FOO", Value: "a"},
-									{Name: "FOO", Value: "b"},
-								},
-								RestartPolicyRules: []corev1.ContainerRestartRule{
-									{
-										Action: corev1.ContainerRestartRuleActionRestart,
-										ExitCodes: &corev1.ContainerRestartRuleOnExitCodes{
-											Operator: corev1.ContainerRestartRuleOnExitCodesOpIn,
-											Values:   []int32{1, 2},
-										},
-									},
-								},
-							},
+							{Name: flinkMainContainerName, Ports: []corev1.ContainerPort{{ContainerPort: 8081}}},
 						},
 						EphemeralContainers: []corev1.EphemeralContainer{
-							{
-								Name:  "debugger",
-								Image: "busybox:1.36",
-								Ports: []corev1.ContainerPort{{ContainerPort: 40000}},
-								Env:   []corev1.EnvVar{{Name: "DBG", Value: "1"}},
-							},
+							{Name: "debugger", Image: "busybox:1.36", Ports: []corev1.ContainerPort{{ContainerPort: 40000}}},
 						},
-						Volumes: []corev1.Volume{
-							{Name: "scratch", EmptyDir: &corev1.EmptyDirVolumeSource{}},
-							{
-								Name: "rbd-vol",
-								RBD:  &corev1.RBDVolumeSource{RBDImage: "img", CephMonitors: []string{"10.0.0.1:6789"}},
-							},
-							{
-								Name:   "ceph-vol",
-								CephFS: &corev1.CephFSVolumeSource{Monitors: []string{"10.0.0.1:6789"}},
-							},
-							{
-								Name: "sio-vol",
-								ScaleIO: &corev1.ScaleIOVolumeSource{
-									Gateway:   "https://gw",
-									System:    "sys",
-									SecretRef: &corev1.LocalObjectReference{Name: "sio-sec"},
-								},
-							},
-							{
-								Name: "cert-vol",
-								Projected: &corev1.ProjectedVolumeSource{
-									Sources: []corev1.VolumeProjection{
-										{
-											PodCertificate: &corev1.PodCertificateProjection{
-												KeyType:    "ECDSAP256",
-												SignerName: "example.com/workload-signer",
-											},
-										},
-									},
-								},
-							},
+						Tolerations: []corev1.Toleration{
+							{Key: "base", Operator: corev1.TolerationOpEqual, Value: "1", Effect: corev1.TaintEffectNoSchedule},
 						},
-						Affinity: &corev1.Affinity{
-							NodeAffinity: &corev1.NodeAffinity{
-								RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-									NodeSelectorTerms: []corev1.NodeSelectorTerm{
-										{
-											MatchExpressions: []corev1.NodeSelectorRequirement{
-												{Key: "kubernetes.io/os", Operator: corev1.NodeSelectorOpIn, Values: []string{"linux"}},
-											},
-										},
-									},
-								},
-							},
-						},
-						SchedulingGates:  []corev1.PodSchedulingGate{{Name: "example.com/custom-gate"}},
-						ResourceClaims:   []corev1.PodResourceClaim{{Name: "gpu-claim", ResourceClaimTemplateName: new("gpu-tpl")}},
-						ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
-						EvictionResponders: []corev1.EvictionResponder{
-							{Name: "acme.io/evictor", Priority: new(int32(10000))},
-						},
-						HostAliases: []corev1.HostAlias{{IP: "127.0.0.1", Hostnames: []string{"local.test"}}},
-						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-							{MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule},
-							{MaxSkew: 2, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway},
+					},
+				})
+				fd.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Tolerations: []corev1.Toleration{
+							{Key: "base", Operator: corev1.TolerationOpEqual, Value: "1", Effect: corev1.TaintEffectNoSchedule},
+							{Key: "tm", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 						},
 					},
 				})
@@ -860,7 +774,7 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 		},
 		"rejects unnamed container when spec.image is set instead of appending phantom flink-main-container": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Image: "busybox:1.36"}},
 					},
@@ -870,7 +784,7 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 		},
 		"rejects invalid DNS-1123 container name": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "BAD_NAME", Image: "busybox:1.36"}},
 					},
@@ -880,7 +794,7 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 		},
 		"rejects duplicate container name after positional merge": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: "sidecar", Image: "busybox:1.36"},
@@ -888,7 +802,7 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 						},
 					},
 				})
-				fd.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: flinkMainContainerName, Image: "flink:1.20"},
@@ -900,7 +814,7 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 		},
 		"rejects duplicate initContainer name": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						InitContainers: []corev1.Container{
 							{Name: "init-a", Image: "busybox:1.36"},
@@ -911,315 +825,52 @@ func TestBuildPodSetsContainerNamesAndListMapValidation(t *testing.T) {
 			},
 			wantErrSubstr: `duplicate initContainers name "init-a"`,
 		},
-		"rejects duplicate container port when empty protocol defaults to TCP": {
+		"rejects non-prefix component tolerations when root tolerations are set": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 8080},
-									{ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
-								},
-							},
-						},
+						Tolerations: []corev1.Toleration{{Key: "base", Operator: corev1.TolerationOpExists}},
+					},
+				})
+				fd.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Tolerations: []corev1.Toleration{{Key: "other", Operator: corev1.TolerationOpExists}},
 					},
 				})
 			},
-			wantErrSubstr: `container "flink-main-container" has duplicate port 8080/TCP`,
+			wantErrSubstr: "must include spec.podTemplate.spec.tolerations as a prefix",
 		},
-		"rejects duplicate ephemeralContainer port when empty protocol defaults to TCP": {
+		"rejects non-prefix component schedulingGates when positional array merging is used": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						EphemeralContainers: []corev1.EphemeralContainer{
-							{
-								Name: "dbg",
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: 9090},
-									{ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
-								},
-							},
-						},
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: "example.com/base"}},
+					},
+				})
+				fd.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: "example.com/role"}},
 					},
 				})
 			},
-			wantErrSubstr: `ephemeralContainer "dbg" has duplicate port 9090/TCP`,
+			wantErrSubstr: "must include spec.podTemplate.spec.schedulingGates as a prefix",
 		},
-		"rejects out-of-range containerPort": {
+		"accepts non-prefix component schedulingGates when merge-arrays-by-name is enabled": {
 			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				fd.Spec.FlinkConfiguration = flinkv1beta1.NewFlinkConfiguration(map[string]string{
+					flinkConfigPodTemplateMergeArraysByName: "true",
+				})
+				fd.Spec.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  flinkMainContainerName,
-								Ports: []corev1.ContainerPort{{ContainerPort: 0}},
-							},
-						},
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: "example.com/base"}},
+					},
+				})
+				fd.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						SchedulingGates: []corev1.PodSchedulingGate{{Name: "example.com/role"}},
 					},
 				})
 			},
-			wantErrSubstr: `ports[0].containerPort (0) must be between 1 and 65535`,
-		},
-		"rejects unsupported port protocol": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  flinkMainContainerName,
-								Ports: []corev1.ContainerPort{{ContainerPort: 8080, Protocol: "HTTP"}},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `ports[0].protocol "HTTP"`,
-		},
-		"rejects duplicate volumeMount mountPath": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								VolumeMounts: []corev1.VolumeMount{
-									{Name: "v1", MountPath: "/data"},
-									{Name: "v2", MountPath: "/data"},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `has duplicate volumeMount mountPath "/data"`,
-		},
-		"rejects duplicate volumeDevice devicePath": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								VolumeDevices: []corev1.VolumeDevice{
-									{Name: "d1", DevicePath: "/dev/xvda"},
-									{Name: "d2", DevicePath: "/dev/xvda"},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `has duplicate volumeDevice devicePath "/dev/xvda"`,
-		},
-		"rejects duplicate container resources.claims": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: flinkMainContainerName,
-								Resources: corev1.ResourceRequirements{
-									Claims: []corev1.ResourceClaim{{Name: "gpu"}, {Name: "gpu"}},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate container "flink-main-container" resources.claims name "gpu"`,
-		},
-		"rejects duplicate ephemeralContainer env name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						EphemeralContainers: []corev1.EphemeralContainer{
-							{
-								Name: "dbg",
-								Env: []corev1.EnvVar{
-									{Name: "DUP", Value: "1"},
-									{Name: "DUP", Value: "2"},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate ephemeralContainer "dbg" env name "DUP"`,
-		},
-		"rejects duplicate PodSpec volumes name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{{Name: "shared"}, {Name: "shared"}},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate volumes name "shared"`,
-		},
-		"rejects duplicate PodSpec schedulingGates name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						SchedulingGates: []corev1.PodSchedulingGate{{Name: "g1"}, {Name: "g1"}},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate schedulingGates name "g1"`,
-		},
-		"rejects duplicate PodSpec resourceClaims name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ResourceClaims: []corev1.PodResourceClaim{{Name: "rc1"}, {Name: "rc1"}},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate resourceClaims name "rc1"`,
-		},
-		"rejects duplicate PodSpec resources.claims name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Resources: &corev1.ResourceRequirements{
-							Claims: []corev1.ResourceClaim{{Name: "pod-claim"}, {Name: "pod-claim"}},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate resources.claims name "pod-claim"`,
-		},
-		"rejects duplicate PodSpec imagePullSecrets name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ImagePullSecrets: []corev1.LocalObjectReference{{Name: "sec"}, {Name: "sec"}},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate imagePullSecrets name "sec"`,
-		},
-		"rejects evictionResponder without priority or duplicate name": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						EvictionResponders: []corev1.EvictionResponder{{Name: "acme.io/r1"}},
-					},
-				})
-			},
-			wantErrSubstr: `evictionResponders[0].priority is required`,
-		},
-		"rejects duplicate PodSpec hostAliases ip": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						HostAliases: []corev1.HostAlias{{IP: "10.0.0.1"}, {IP: "10.0.0.1"}},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate hostAliases ip "10.0.0.1"`,
-		},
-		"rejects duplicate topologySpreadConstraints (topologyKey, whenUnsatisfiable)": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-							{MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule},
-							{MaxSkew: 2, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `duplicate topologySpreadConstraints entry for topologyKey "topology.kubernetes.io/zone" and whenUnsatisfiable "DoNotSchedule"`,
-		},
-		"rejects empty requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Affinity: &corev1.Affinity{
-							NodeAffinity: &corev1.NodeAffinity{
-								RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms must not be empty`,
-		},
-		"rejects rbd volume without monitors": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "rbd", RBD: &corev1.RBDVolumeSource{RBDImage: "img"}},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `volumes[0].rbd.monitors must not be empty`,
-		},
-		"rejects cephfs volume without monitors": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "ceph", CephFS: &corev1.CephFSVolumeSource{Path: "/mnt"}},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `volumes[0].cephfs.monitors must not be empty`,
-		},
-		"rejects scaleIO volume without secretRef": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{Name: "sio", ScaleIO: &corev1.ScaleIOVolumeSource{Gateway: "https://gw", System: "sys"}},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `volumes[0].scaleIO.secretRef is required`,
-		},
-		"rejects projected podCertificate without keyType": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{
-								Name: "proj",
-								Projected: &corev1.ProjectedVolumeSource{
-									Sources: []corev1.VolumeProjection{
-										{PodCertificate: &corev1.PodCertificateProjection{SignerName: "example.com/signer"}},
-									},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `volumes[0].projected.sources[0].podCertificate.keyType must not be empty`,
-		},
-		"rejects projected podCertificate without signerName": {
-			mutate: func(fd *flinkv1beta1.FlinkDeployment) {
-				fd.Spec.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Volumes: []corev1.Volume{
-							{
-								Name: "proj",
-								Projected: &corev1.ProjectedVolumeSource{
-									Sources: []corev1.VolumeProjection{
-										{PodCertificate: &corev1.PodCertificateProjection{KeyType: "ECDSAP256"}},
-									},
-								},
-							},
-						},
-					},
-				})
-			},
-			wantErrSubstr: `volumes[0].projected.sources[0].podCertificate.signerName must not be empty`,
 		},
 	}
 

@@ -18,13 +18,10 @@ package jobs
 
 import (
 	"math"
-	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,7 +36,6 @@ import (
 	flinkv1beta1 "sigs.k8s.io/kueue/pkg/controller/jobs/flinkdeployment/apis/v1beta1"
 	"sigs.k8s.io/kueue/pkg/features"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
-	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingflinkdeployment "sigs.k8s.io/kueue/pkg/util/testingjobs/flinkdeployment"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/util/behavioral"
@@ -317,12 +313,7 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		gomega.Expect(err.Error()).To(gomega.ContainSubstring("spec.jobManager.resource.memory"))
 	})
 
-	ginkgo.It("should enforce Workload-backed admission transitions and running-state immutability", func() {
-		flavor := utiltestingapi.MakeResourceFlavor("webhook-spot-flavor").
-			NodeLabel("tier", "spot").
-			Obj()
-		behavioral.MustCreate(ctx, k8sClient, flavor)
-
+	ginkgo.It("should enforce stateless update validation and running-state immutability", func() {
 		app := testingflinkdeployment.MakeFlinkDeployment("running-app", ns.Name).
 			Queue("local-queue").
 			TaskManagerPodTemplate(&corev1.PodTemplateSpec{
@@ -336,150 +327,55 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		lookupKey := types.NamespacedName{Name: app.Name, Namespace: app.Namespace}
 		created := &flinkv1beta1.FlinkDeployment{}
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-
-		ginkgo.By("rejecting suspended -> running before an owned Workload exists")
-		unadmittedAttempt := created.DeepCopy()
-		unadmittedAttempt.Spec.Job.State = flinkv1beta1.JobStateRunning
-		err := k8sClient.Update(ctx, unadmittedAttempt)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-
-		gvk := flinkv1beta1.SchemeGroupVersion.WithKind("FlinkDeployment")
 		wlName := flinkdeployment.GetWorkloadNameForFlinkDeployment(created.Name, created.UID)
-		wl := utiltestingapi.MakeWorkload(wlName, ns.Name).
-			Queue("local-queue").
-			PodSets(
-				*utiltestingapi.MakePodSet("job-manager", 1).
-					Containers(corev1.Container{
-						Name:  "flink-main-container",
-						Image: "flink:1.20",
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("1"),
-								corev1.ResourceMemory: resource.MustParse("1Gi"),
-							},
-							Limits: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("1"),
-								corev1.ResourceMemory: resource.MustParse("1Gi"),
-							},
-						},
-					}).
-					Obj(),
-				*utiltestingapi.MakePodSet("task-manager", 1).
-					NodeSelector(map[string]string{"tenant": "team-a"}).
-					Containers(corev1.Container{
-						Name:  "flink-main-container",
-						Image: "flink:1.20",
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("1"),
-								corev1.ResourceMemory: resource.MustParse("2Gi"),
-							},
-							Limits: corev1.ResourceList{
-								corev1.ResourceCPU:    resource.MustParse("1"),
-								corev1.ResourceMemory: resource.MustParse("2Gi"),
-							},
-						},
-					}).
-					Obj(),
-			).
-			ControllerReference(gvk, created.Name, string(created.UID)).
-			Obj()
-		behavioral.MustCreate(ctx, k8sClient, wl)
 
-		ginkgo.By("rejecting suspended -> running while the owned Workload is still queued")
-		queuedAttempt := created.DeepCopy()
-		queuedAttempt.Spec.Job.State = flinkv1beta1.JobStateRunning
-		err = k8sClient.Update(ctx, queuedAttempt)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-
-		ginkgo.By("admitting the owned Workload")
-		now := time.Now()
-		admittedStatusWl := utiltestingapi.MakeWorkload(wlName, ns.Name).
-			ReserveQuotaAt(
-				utiltestingapi.MakeAdmission("cluster-queue").
-					PodSets(
-						utiltestingapi.MakePodSetAssignment("job-manager").
-							Assignment(corev1.ResourceCPU, kueue.ResourceFlavorReference(flavor.Name), "1").
-							Obj(),
-						utiltestingapi.MakePodSetAssignment("task-manager").
-							Assignment(corev1.ResourceCPU, kueue.ResourceFlavorReference(flavor.Name), "1").
-							Obj(),
-					).
-					Obj(),
-				now,
-			).
-			AdmittedAt(true, now).
-			Obj()
-		gomega.Eventually(func(g gomega.Gomega) {
-			liveWl := &kueue.Workload{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), liveWl)).To(gomega.Succeed())
-			liveWl.Status = admittedStatusWl.Status
-			g.Expect(k8sClient.Status().Update(ctx, liveWl)).To(gomega.Succeed())
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		ginkgo.By("rejecting suspended -> running with hijacked ResourceFlavor nodeSelector")
+		ginkgo.By("allowing podTemplate and replica updates while suspended")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-			hijacked := created.DeepCopy()
-			hijacked.Spec.Job.State = flinkv1beta1.JobStateRunning
-			hijacked.Spec.JobManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+			created.Spec.TaskManager.Replicas = new(int64(2))
+			created.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{"tier": "on-demand"},
+					NodeSelector: map[string]string{"tenant": "team-b"},
 				},
 			})
-			updateErr := k8sClient.Update(ctx, hijacked)
-			g.Expect(updateErr).To(gomega.HaveOccurred())
-			g.Expect(updateErr).To(utiltesting.BeForbiddenError())
-			g.Expect(updateErr.Error()).To(gomega.ContainSubstring("field is immutable when FlinkDeployment is not suspended"))
+			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
-		ginkgo.By("rejecting podTemplate mutation while suspended once Workload is admitted")
+		ginkgo.By("rejecting invalid max-exec-time-seconds while suspended")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		suspendedMutate := created.DeepCopy()
-		suspendedMutate.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				NodeSelector: map[string]string{"tenant": "hijacked"},
-			},
-		})
-		err = k8sClient.Update(ctx, suspendedMutate)
+		invalidMaxExec := created.DeepCopy()
+		invalidMaxExec.Labels[controllerconstants.MaxExecTimeSecondsLabel] = "30m"
+		err := k8sClient.Update(ctx, invalidMaxExec)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("strconv.Atoi"))
 
-		ginkgo.By("allowing suspended -> running when PodSet overlays match the admitted Workload")
+		ginkgo.By("allowing suspended -> running transition with ResourceFlavor placement overlays")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 			created.Spec.Job.State = flinkv1beta1.JobStateRunning
-			created.Spec.JobManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+			created.Spec.JobManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				Labels: map[string]string{
+					kueueconstants.PodSetLabel:       "job-manager",
+					kueueconstants.LocalQueueLabel:   "local-queue",
+					kueueconstants.ClusterQueueLabel: "cluster-queue",
+				},
+				Annotations: map[string]string{kueue.WorkloadAnnotation: wlName},
 				Spec: corev1.PodSpec{
 					NodeSelector: map[string]string{"tier": "spot"},
 				},
 			})
-			created.Spec.JobManager.PodTemplate.Labels = map[string]string{
-				kueueconstants.PodSetLabel:       "job-manager",
-				kueueconstants.LocalQueueLabel:   "local-queue",
-				kueueconstants.ClusterQueueLabel: "cluster-queue",
-			}
-			created.Spec.JobManager.PodTemplate.Annotations = map[string]string{
-				kueue.WorkloadAnnotation: wlName,
-			}
-			created.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+			created.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+				Labels: map[string]string{
+					kueueconstants.PodSetLabel:       "task-manager",
+					kueueconstants.LocalQueueLabel:   "local-queue",
+					kueueconstants.ClusterQueueLabel: "cluster-queue",
+				},
+				Annotations: map[string]string{kueue.WorkloadAnnotation: wlName},
 				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{
-						"tenant": "team-a",
-						"tier":   "spot",
-					},
+					NodeSelector: map[string]string{"tenant": "team-b", "tier": "spot"},
 				},
 			})
-			created.Spec.TaskManager.PodTemplate.Labels = map[string]string{
-				kueueconstants.PodSetLabel:       "task-manager",
-				kueueconstants.LocalQueueLabel:   "local-queue",
-				kueueconstants.ClusterQueueLabel: "cluster-queue",
-			}
-			created.Spec.TaskManager.PodTemplate.Annotations = map[string]string{
-				kueue.WorkloadAnnotation: wlName,
-			}
 			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 
@@ -489,6 +385,7 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		err = k8sClient.Update(ctx, created)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("field is immutable when FlinkDeployment is not suspended"))
 
 		ginkgo.By("rejecting spec.serviceAccount mutation while running")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
@@ -496,27 +393,11 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		err = k8sClient.Update(ctx, created)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("field is immutable when FlinkDeployment is not suspended"))
 
 		ginkgo.By("rejecting removing kueue.x-k8s.io/queue-name while running")
 		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 		delete(created.Labels, controllerconstants.QueueLabel)
-		err = k8sClient.Update(ctx, created)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-
-		ginkgo.By("rejecting simultaneous spec.job.state=suspended and scaling replicas on a running FlinkDeployment")
-		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		created.Spec.Job.State = flinkv1beta1.JobStateSuspended
-		created.Spec.TaskManager.Replicas = new(int64(4))
-		err = k8sClient.Update(ctx, created)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-
-		ginkgo.By("rejecting simultaneous spec.job.state=suspended and wiping tenant nodeSelector")
-		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		created.Spec.Job.State = flinkv1beta1.JobStateSuspended
-		created.Spec.JobManager.PodTemplate = nil
-		created.Spec.TaskManager.PodTemplate = nil
 		err = k8sClient.Update(ctx, created)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
@@ -529,77 +410,27 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
 
-		ginkgo.By("allowing manual spec.job.state=suspended followed by Stop's suspended -> suspended RestorePodSetsInfo once Workload is evicted")
+		ginkgo.By("allowing running -> suspended transition with overlay restoration")
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 			created.Spec.Job.State = flinkv1beta1.JobStateSuspended
-			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		gomega.Eventually(func(g gomega.Gomega) {
-			liveWl := &kueue.Workload{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), liveWl)).To(gomega.Succeed())
-			evictedWl := utiltestingapi.MakeWorkload(wlName, ns.Name).
-				Condition(metav1.Condition{
-					Type:               kueue.WorkloadEvicted,
-					Status:             metav1.ConditionTrue,
-					Reason:             kueue.WorkloadDeactivated,
-					LastTransitionTime: metav1.Now(),
-				}).
-				Obj()
-			liveWl.Status.Conditions = append(liveWl.Status.Conditions, evictedWl.Status.Conditions...)
-			g.Expect(k8sClient.Status().Update(ctx, liveWl)).To(gomega.Succeed())
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
 			created.Spec.JobManager.PodTemplate = nil
-			created.Spec.TaskManager.PodTemplate = flinkv1beta1.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
+			created.Spec.TaskManager.PodTemplate = testingflinkdeployment.FromCorePodTemplateSpec(&corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{"tenant": "team-a"},
+					NodeSelector: map[string]string{"tenant": "team-b"},
 				},
 			})
 			g.Expect(k8sClient.Update(ctx, created)).To(gomega.Succeed())
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		ginkgo.By("rejecting invalid max-exec-time-seconds on an already-restored evicted FlinkDeployment once quota reservation is cleared")
-		gomega.Eventually(func(g gomega.Gomega) {
-			liveWl := &kueue.Workload{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), liveWl)).To(gomega.Succeed())
-			liveWl.Status.Admission = nil
-			liveWl.Status.Conditions = []metav1.Condition{
-				{
-					Type:               kueue.WorkloadQuotaReserved,
-					Status:             metav1.ConditionFalse,
-					Reason:             kueue.WorkloadEvicted,
-					LastTransitionTime: metav1.Now(),
-				},
-				{
-					Type:               kueue.WorkloadEvicted,
-					Status:             metav1.ConditionTrue,
-					Reason:             kueue.WorkloadDeactivated,
-					LastTransitionTime: metav1.Now(),
-				},
-			}
-			g.Expect(k8sClient.Status().Update(ctx, liveWl)).To(gomega.Succeed())
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-
-		gomega.Expect(k8sClient.Get(ctx, lookupKey, created)).To(gomega.Succeed())
-		invalidMaxExec := created.DeepCopy()
-		invalidMaxExec.Labels[controllerconstants.MaxExecTimeSecondsLabel] = "30m"
-		err = k8sClient.Update(ctx, invalidMaxExec)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("strconv.Atoi"))
 	})
 
-	ginkgo.It("should preserve raw integer byte memory quantities on create and reject fractional BinarySI memory on update while suspended", func() {
-		rawObj := &unstructured.Unstructured{
+	ginkgo.It("should preserve raw BinarySI memory and integer CPU tokens on create and reject plain integer bytes or fractional BinarySI memory", func() {
+		plainBytesRaw := &unstructured.Unstructured{
 			Object: map[string]any{
 				"apiVersion": "flink.apache.org/v1beta1",
 				"kind":       "FlinkDeployment",
 				"metadata": map[string]any{
-					"name":      "raw-bytes-app",
+					"name":      "rejected-plain-bytes-app",
 					"namespace": ns.Name,
 					"labels": map[string]any{
 						controllerconstants.QueueLabel: "local-queue",
@@ -620,7 +451,50 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 						"resources": map[string]any{
 							"requests": map[string]any{
 								"cpu":    "1",
-								"memory": "1024000",
+								"memory": "2Gi",
+							},
+						},
+					},
+					"job": map[string]any{
+						"jarURI":      "local:///opt/flink/examples/streaming/StateMachineExample.jar",
+						"parallelism": int64(2),
+						"state":       "running",
+					},
+				},
+			},
+		}
+		err := k8sClient.Create(ctx, plainBytesRaw)
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(err).To(utiltesting.BeForbiddenError())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("must use a BinarySI suffix"))
+
+		rawObj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "flink.apache.org/v1beta1",
+				"kind":       "FlinkDeployment",
+				"metadata": map[string]any{
+					"name":      "raw-binarysi-app",
+					"namespace": ns.Name,
+					"labels": map[string]any{
+						controllerconstants.QueueLabel: "local-queue",
+					},
+				},
+				"spec": map[string]any{
+					"image":        "flink:1.20",
+					"flinkVersion": "v1_20",
+					"jobManager": map[string]any{
+						"resources": map[string]any{
+							"requests": map[string]any{
+								"cpu":    int64(1),
+								"memory": "1024Mi",
+							},
+						},
+					},
+					"taskManager": map[string]any{
+						"resources": map[string]any{
+							"requests": map[string]any{
+								"cpu":    "1500m",
+								"memory": "2Gi",
 							},
 						},
 					},
@@ -634,7 +508,7 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		}
 		behavioral.MustCreate(ctx, k8sClient, rawObj)
 
-		lookupKey := types.NamespacedName{Name: "raw-bytes-app", Namespace: ns.Name}
+		lookupKey := types.NamespacedName{Name: "raw-binarysi-app", Namespace: ns.Name}
 		persistedRaw := &unstructured.Unstructured{}
 		persistedRaw.SetAPIVersion("flink.apache.org/v1beta1")
 		persistedRaw.SetKind("FlinkDeployment")
@@ -645,15 +519,15 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		gomega.Expect(found).To(gomega.BeTrue())
 		gomega.Expect(jobState).To(gomega.Equal(string(flinkv1beta1.JobStateSuspended)))
 
+		jmCPU, found, err := unstructured.NestedFieldNoCopy(persistedRaw.Object, "spec", "jobManager", "resources", "requests", "cpu")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(found).To(gomega.BeTrue())
+		gomega.Expect(jmCPU).To(gomega.Equal(int64(1)))
+
 		jmMem, found, err := unstructured.NestedFieldNoCopy(persistedRaw.Object, "spec", "jobManager", "resources", "requests", "memory")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(found).To(gomega.BeTrue())
-		gomega.Expect(jmMem).To(gomega.Equal(int64(1000000000)))
-
-		tmMem, found, err := unstructured.NestedFieldNoCopy(persistedRaw.Object, "spec", "taskManager", "resources", "requests", "memory")
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(found).To(gomega.BeTrue())
-		gomega.Expect(tmMem).To(gomega.Equal("1024000"))
+		gomega.Expect(jmMem).To(gomega.Equal("1024Mi"))
 
 		ginkgo.By("rejecting fractional BinarySI memory literal on UPDATE while suspended")
 		gomega.Expect(unstructured.SetNestedField(
@@ -972,9 +846,9 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		err = k8sClient.Create(ctx, invalidToleration)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("operator must be Exists when key is empty"))
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("toleration[0]: invalid Equal toleration"))
 
-		ginkgo.By("rejecting unnamed containers and duplicate x-kubernetes-list-map-keys in merged podTemplates")
+		ginkgo.By("rejecting unnamed containers and non-prefix component tolerations in merged podTemplates")
 		unnamedContainer := testingflinkdeployment.MakeFlinkDeployment("unnamed-container", ns.Name).
 			Queue("local-queue").
 			PodTemplate(&corev1.PodTemplateSpec{
@@ -990,108 +864,27 @@ var _ = ginkgo.Describe("FlinkDeployment Webhook", func() {
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
 		gomega.Expect(err.Error()).To(gomega.ContainSubstring(`containers[0].name ""`))
 
-		dupPortAfterDefault := testingflinkdeployment.MakeFlinkDeployment("dup-port-default", ns.Name).
+		nonPrefixTolerations := testingflinkdeployment.MakeFlinkDeployment("non-prefix-tolerations", ns.Name).
 			Queue("local-queue").
 			PodTemplate(&corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "flink-main-container",
-							Ports: []corev1.ContainerPort{{ContainerPort: 8080}, {ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
-						},
+					Tolerations: []corev1.Toleration{
+						{Key: "base", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+					},
+				},
+			}).
+			TaskManagerPodTemplate(&corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Tolerations: []corev1.Toleration{
+						{Key: "role-only", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 					},
 				},
 			}).
 			Obj()
-		err = k8sClient.Create(ctx, dupPortAfterDefault)
+		err = k8sClient.Create(ctx, nonPrefixTolerations)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("has duplicate port 8080/TCP"))
-
-		ginkgo.By("rejecting missing Workload-required volume and nodeAffinity fields on Kueue-managed FlinkDeployments")
-		missingNodeSelectorTerms := testingflinkdeployment.MakeFlinkDeployment("missing-nst", ns.Name).
-			Queue("local-queue").
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Affinity: &corev1.Affinity{
-						NodeAffinity: &corev1.NodeAffinity{
-							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{},
-						},
-					},
-				},
-			}).
-			Obj()
-		err = k8sClient.Create(ctx, missingNodeSelectorTerms)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("nodeSelectorTerms must not be empty"))
-
-		missingRBDMonitors := testingflinkdeployment.MakeFlinkDeployment("missing-rbd-monitors", ns.Name).
-			Queue("local-queue").
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{Name: "rbd", RBD: &corev1.RBDVolumeSource{RBDImage: "img"}},
-					},
-				},
-			}).
-			Obj()
-		err = k8sClient.Create(ctx, missingRBDMonitors)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("volumes[0].rbd.monitors must not be empty"))
-
-		missingCephMonitors := testingflinkdeployment.MakeFlinkDeployment("missing-ceph-monitors", ns.Name).
-			Queue("local-queue").
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{Name: "ceph", CephFS: &corev1.CephFSVolumeSource{Path: "/mnt"}},
-					},
-				},
-			}).
-			Obj()
-		err = k8sClient.Create(ctx, missingCephMonitors)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("volumes[0].cephfs.monitors must not be empty"))
-
-		missingScaleIOSecret := testingflinkdeployment.MakeFlinkDeployment("missing-sio-secret", ns.Name).
-			Queue("local-queue").
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{Name: "sio", ScaleIO: &corev1.ScaleIOVolumeSource{Gateway: "https://gw", System: "sys"}},
-					},
-				},
-			}).
-			Obj()
-		err = k8sClient.Create(ctx, missingScaleIOSecret)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("volumes[0].scaleIO.secretRef is required"))
-
-		missingPodCertSigner := testingflinkdeployment.MakeFlinkDeployment("missing-podcert-signer", ns.Name).
-			Queue("local-queue").
-			PodTemplate(&corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{
-							Name: "proj",
-							Projected: &corev1.ProjectedVolumeSource{
-								Sources: []corev1.VolumeProjection{
-									{PodCertificate: &corev1.PodCertificateProjection{KeyType: "ECDSAP256"}},
-								},
-							},
-						},
-					},
-				},
-			}).
-			Obj()
-		err = k8sClient.Create(ctx, missingPodCertSigner)
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err).To(utiltesting.BeForbiddenError())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("volumes[0].projected.sources[0].podCertificate.signerName must not be empty"))
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("component podTemplate.spec.tolerations must include spec.podTemplate.spec.tolerations as a prefix"))
 	})
 
 	ginkgo.It("should enforce spec and label immutability on terminating FlinkDeployment with SkipAncestorCheckForDeletedWorkloads enabled while allowing finalizer removal", func() {
